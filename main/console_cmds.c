@@ -15,7 +15,6 @@
 #include "esp_console.h"
 #include "host/ble_gap.h"   // bt scan 诊断:ble_gap_disc 主动扫描
 #include "host/ble_dtm.h"   // bt dtx 诊断:controller 直接测试模式
-#include "driver/gpio.h"   // pwrprobe:GPIO 探测
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"  // IDF >= 5.5: esp_restart 声明移入 esp_system.h
@@ -329,48 +328,6 @@ static int cmd_factory(int argc, char **argv)
     return 0;
 }
 
-// ---- pwrprobe:电源键 GPIO 探测(v0.2.2)----
-// 官方硬件(AI Passport)左侧有独立电源键,但 BSP 引脚表无定义 —— 电源键
-// 可能接在未使用的 GPIO11-17 上(18/19 为 USB 占用)。本命令轮询这些脚,
-// 按电源键观察哪只脚电平跳变 = 该脚接了电源键(可软件接管);无跳变 =
-// 硬件级电源开关(不经 MCU,固件不可见)。仅 REPL 面(不进 s_cmds:20s
-// 轮询会阻塞 SYS 执行上下文)。
-#define PWRPROBE_PINS  { 11, 12, 13, 14, 15, 16, 17 }
-#define PWRPROBE_MS    20000
-
-static int cmd_pwrprobe(int argc, char **argv)
-{
-    const int pins[] = PWRPROBE_PINS;
-    const int n = (int)(sizeof(pins) / sizeof(pins[0]));
-    int last[8];
-    (void)argc; (void)argv;
-    out("pwrprobe: 轮询 GPIO");
-    for (int i = 0; i < n; i++) out("%s%d", i ? "," : "", pins[i]);
-    out(" (输入上拉)。请按左侧电源键数次, 观察跳变; %u.%us 自动退出。\n",
-        PWRPROBE_MS / 1000, PWRPROBE_MS % 1000 / 100);
-    for (int i = 0; i < n; i++) {
-        gpio_set_direction(pins[i], GPIO_MODE_INPUT);
-        gpio_set_pull_mode(pins[i], GPIO_PULLUP_ONLY);
-        last[i] = gpio_get_level(pins[i]);
-    }
-    vTaskDelay(pdMS_TO_TICKS(100));   // 上拉建立/防抖稳定
-    for (int i = 0; i < n; i++) last[i] = gpio_get_level(pins[i]);
-    const uint32_t t0 = xTaskGetTickCount();
-    while ((xTaskGetTickCount() - t0) < pdMS_TO_TICKS(PWRPROBE_MS)) {
-        for (int i = 0; i < n; i++) {
-            const int lv = gpio_get_level(pins[i]);
-            if (lv != last[i]) {
-                out("GPIO%-2d -> %s\n", pins[i],
-                    lv ? "HIGH(松开)" : "LOW(按下)");
-                last[i] = lv;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-    out("pwrprobe: 结束(无跳变 = 电源键未接 MCU)\n");
-    return 0;
-}
-
 // ---- 命令表(REPL 注册与 SYS 执行共用)----
 // 注:模式切换命令(mode)已随双通道常开架构退役(2026-08-28)。
 static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
@@ -380,9 +337,6 @@ static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = 
     { "rst",     cmd_rst },
     { "reboot",  cmd_reboot },
     { "factory", cmd_factory },
-    // pwrprobe 探测专用:USB SYS 面执行会阻塞 usb_link 读任务 20s(仅调试
-    // 场景使用;期间 BLE 音频/事件通道不受影响)。输出捕获 2048B 内够用。
-    { "pwrprobe", cmd_pwrprobe },
 };
 #define CMD_COUNT (sizeof(s_cmds) / sizeof(s_cmds[0]))
 
@@ -458,7 +412,6 @@ static void reg(const char *name, const char *help, const char *hint,
 
 esp_err_t console_cmds_register(void)
 {
-    reg("pwrprobe", "电源键探测:轮询 GPIO11-17 电平,按电源键看哪脚跳变", NULL, cmd_pwrprobe);
     reg("bt", "BT 射频诊断:bt scan | bt dtx [ch](直接测试模式强制发射)", NULL, cmd_bt);
     reg("log", "导出日志环(有 USB 主机时日志进 RAM 环)", NULL, cmd_log);
     reg("st", "系统状态一览(双链路/MTU/掉帧/堆)", NULL, cmd_st);

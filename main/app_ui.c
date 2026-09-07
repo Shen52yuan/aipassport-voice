@@ -48,8 +48,8 @@ typedef struct {
     lv_obj_t *ap_target;                  // APPROVAL:目标
     lv_obj_t *ap_diff;                    // APPROVAL:摘要/详情
     // ---- v0.2.0 三场景 + 分段录入 ----
-    lv_obj_t *sc_row_block[3];            // SCENE_SELECT:高亮块(当前项)
-    lv_obj_t *sc_row_label[3];            // SCENE_SELECT:三行场景名
+    lv_obj_t *sc_row_block[APP_SCENE_COUNT];   // SCENE_SELECT:高亮块(当前项)
+    lv_obj_t *sc_row_label[APP_SCENE_COUNT];   // SCENE_SELECT:四行场景名
     lv_obj_t *seg_title;                  // SEG_WAIT:第 N 段标题
     lv_obj_t *seg_text;                   // SEG_WAIT:本段预览文字
     lv_obj_t *seg_hint;                   // SEG_WAIT:按键提示(动态:可续/已达上限)
@@ -77,11 +77,11 @@ static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单�
 static const char *const RISK_NAMES[APP_RISK_COUNT] = { "低风险", "中风险", "高风险" };
 static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
 
-// v0.2.0: 三场景名(场景选择页行文本 + READY 顶栏场景小标签共用)。
+// v0.2.0/v0.2.3: 四场景名(场景选择页行文本 + READY 顶栏场景小标签共用)。
 // 定义置于文件顶部:build_ready 与 build_scene_select 都在使用,
 // C 要求先声明后使用。
 static const char *const SCENE_NAMES[APP_SCENE_COUNT] = {
-    "① 同事", "② 领导/客户", "③ 对AI",
+    "① 同事", "② 领导/客户", "③ 对AI", "④ 语音输入",
 };
 
 // ---- 基础块(无 LVGL 样式噪音) ----
@@ -219,7 +219,7 @@ static void build_ready(void)
     // v0.2.0: 当前场景小标签(render 按 scene 更新; 让用户知道对谁说话)
     p->ready_scene = label(p->root, SCENE_NAMES[0], &font_cn_14, UI_SKY_DARK,
                            0, CONTENT_Y + 62, W);
-    hint_label(p->root, "按住音量+:说话  下键:回车  双击音量+:清空");
+    hint_label(p->root, "按住音量+:说话  OK:选场景  下键:回车");
 }
 
 // v0.2.0: 场景选择页 —— 三行可选(同事 / 领导客户 / 对AI)
@@ -244,7 +244,7 @@ static void build_scene_select(void)
         p->sc_row_label[i] = label(p->root, SCENE_NAMES[i], &font_cn_14,
                                    i == 0 ? 0xFFFFFF : UI_INK, 24, y + 7, 192);
     }
-    hint_label(p->root, "音量+/-:选择  确认键:确定");
+    hint_label(p->root, "音量+/-:选择  OK:确定  长按:返回");
 }
 
 // v0.2.0: 段间等待页 —— 显示第 N 段已录 + 本段预览; 可续录/结束
@@ -259,14 +259,15 @@ static void build_seg_wait(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    p->seg_title = label(p->root, "第 1 段已录", &font_cn_20, UI_INK, 0,
-                         CONTENT_Y + 12, W);
-    // 预览正文(可换行): 上留标题, 下留按键区
-    p->seg_text = label(p->root, "", &font_cn_14, UI_MUTED, 16, CONTENT_Y + 56,
-                        W - 32);
+    // v0.2.3: 标题降为 14px 小标签置顶(省出正文空间), 正文最大化到提示行
+    p->seg_title = label(p->root, "第 1 段已录", &font_cn_14, UI_SKY_DARK,
+                         16, CONTENT_Y + 2, 200);
+    // 预览正文(可换行, 区域最大化): 标题下到按键提示上, 一次阅览更多文字
+    p->seg_text = label(p->root, "", &font_cn_14, UI_INK, 12, CONTENT_Y + 22,
+                        W - 24);
     lv_obj_set_style_text_align(p->seg_text, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(p->seg_text, LV_LABEL_LONG_WRAP);
-    lv_obj_set_height(p->seg_text, 150);
+    lv_obj_set_height(p->seg_text, HINT_Y - (CONTENT_Y + 22) - 8);
     p->seg_hint = hint_label(p->root, "音量+:续录  确认键:结束并整理");
 }
 
@@ -282,13 +283,14 @@ static void build_merge_review(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    p->mr_title = label(p->root, "整理稿", &font_cn_20, UI_SKY_DARK, 0,
-                        CONTENT_Y + 8, W);
-    p->mr_text = label(p->root, "", &font_cn_14, UI_INK, 16, CONTENT_Y + 44,
-                       W - 32);
+    // v0.2.3: 标题降 14px 小标签, 正文最大化(同 SEG_WAIT 布局)
+    p->mr_title = label(p->root, "整理稿", &font_cn_14, UI_SKY_DARK, 16,
+                        CONTENT_Y + 2, 200);
+    p->mr_text = label(p->root, "", &font_cn_14, UI_INK, 12, CONTENT_Y + 22,
+                       W - 24);
     lv_obj_set_style_text_align(p->mr_text, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(p->mr_text, LV_LABEL_LONG_WRAP);
-    lv_obj_set_height(p->mr_text, 200);
+    lv_obj_set_height(p->mr_text, HINT_Y - (CONTENT_Y + 22) - 8);
     hint_label(p->root, "确认键:发送  音量+:放弃");
 }
 
@@ -322,8 +324,13 @@ static void build_transcribing(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    label(p->root, "转写中...", &font_cn_20, UI_INK, 0, 96, W);
-    p->tr_message = label(p->root, "", &font_cn_14, UI_MUTED, 20, 140, 200);
+    // v0.2.3: "转写中..." 降 14px 小标题置顶, 转写文本区最大化
+    label(p->root, "转写中...", &font_cn_14, UI_SKY_DARK, 16, CONTENT_Y + 2, 200);
+    p->tr_message = label(p->root, "", &font_cn_14, UI_MUTED, 12,
+                          CONTENT_Y + 22, W - 24);
+    lv_obj_set_style_text_align(p->tr_message, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(p->tr_message, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(p->tr_message, HINT_Y - (CONTENT_Y + 22) - 8);
     hint_label(p->root, "请稍候");
 }
 

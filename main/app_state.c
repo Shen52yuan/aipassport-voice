@@ -381,11 +381,31 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             t.u.tone = APP_TONE_SUCCESS;
             emit(out, n, max, t);
             go_ready(s, now_ms, out, n, max);
+        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
+                   !key_ev_is_fake(ev)) {
+            // v0.2.3 返回上一级: 场景选择页长按 OK → 返回 HOME(未选中不改变
+            // 当前场景, 下次进来光标仍停原场景)。锁定入口仅 HOME/READY,
+            // 此键在此态无冲突。
+            s->state = APP_ST_HOME;
+            s->state_since_ms = now_ms;
+            app_action_t t = { .type = APP_ACT_PLAY_TONE };
+            t.u.tone = APP_TONE_REJECT;   // 返回提示音(与"放弃"同音)
+            emit(out, n, max, t);
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
         }
         break;
 
     case APP_ST_READY:
-        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            // v0.2.3 返回上一级: 就绪页 OK 单击 → 返回场景选择页(可重选场景
+            // 再回来; 想锁屏仍长按 OK, 单击/长按互不冲突)。
+            s->state = APP_ST_SCENE_SELECT;
+            s->state_since_ms = now_ms;
+            s->scene_cursor = s->scene;   // 光标停当前场景
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
             // 音量加"按下即录"(2026-08-29,取代原先等 0.5s 长按判定):真机实测

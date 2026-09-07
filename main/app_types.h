@@ -31,11 +31,12 @@ typedef enum {
     APP_ST_COUNT,
 } app_stage_t;
 
-// v0.2.0 场景(与 relay refine_preset 对应,字符串互转在 app_protocol.c)
+// v0.2.0/v0.2.3 场景(与 relay refine_preset 对应,字符串互转在 app_protocol.c)
 typedef enum {
     APP_SCENE_WORK = 0,     // ① 同事(work_wechat)
     APP_SCENE_REPORT,       // ② 领导/客户(report_boss)
     APP_SCENE_AGENT,        // ③ 对 AI / vibe(agent_prompt)
+    APP_SCENE_VOICE_INPUT,  // ④ 语音输入(voice_input: 单段录音→口语梳理清晰)
     APP_SCENE_COUNT,
 } app_scene_t;
 

@@ -160,15 +160,17 @@ app_scene_t app_protocol_scene_from_str(const char *s) {
     if (s) {
         if (strcmp(s, "report_boss") == 0) return APP_SCENE_REPORT;
         if (strcmp(s, "agent_prompt") == 0) return APP_SCENE_AGENT;
+        if (strcmp(s, "voice_input") == 0)  return APP_SCENE_VOICE_INPUT;
     }
     return APP_SCENE_WORK;   // work_wechat(默认)或未知 → 同事
 }
 
 const char *app_protocol_scene_to_str(app_scene_t scene) {
     switch (scene) {
-    case APP_SCENE_REPORT: return "report_boss";
-    case APP_SCENE_AGENT:  return "agent_prompt";
-    default:               return "work_wechat";
+    case APP_SCENE_REPORT:      return "report_boss";
+    case APP_SCENE_AGENT:       return "agent_prompt";
+    case APP_SCENE_VOICE_INPUT: return "voice_input";
+    default:                    return "work_wechat";
     }
 }
 
