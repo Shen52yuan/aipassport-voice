@@ -1,6 +1,7 @@
 # AI Passport 自定义分区表(8MB Flash,单 app 无 OTA)
-# factory 4MB: 当前固件 ~1.7MB,为后续功能与 OTA 预留空间。
+# factory 6MB(v0.1.0 汉化扩容:内嵌中文字库 font_cn_14 2.4MB + font_cn_20 0.2MB,
+# 固件本体 ~1.7MB → 合计 ~4.3MB,4MB 分区放不下 → 扩到 6MB,尾部留 ~2MB 给 OTA)。
 # Name,   Type, SubType, Offset,  Size,    Flags
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x400000,
+factory,  app,  factory, 0x10000, 0x600000,

@@ -9,6 +9,12 @@
 #include <stdio.h>
 #include <string.h>
 
+// 中文字库(v0.1.0 汉化):font_cn_14 覆盖 GB2312 一级 3755 常用字(正文/动态
+// 下行文本);font_cn_20 为标题大字(界面静态词+状态/审批高频词)。
+// 由 lv_font_conv 由 Noto Sans CJK SC(OFL 开源许可)生成,见 main/fonts/。
+LV_FONT_DECLARE(font_cn_14);
+LV_FONT_DECLARE(font_cn_20);
+
 // ---- 布局常量 ----
 #define BAR_H        26   // 顶栏高
 #define BANNER_Y     28   // OFFLINE / NET BUSY 横幅
@@ -59,7 +65,7 @@ static app_stage_t s_cur_page = APP_ST_COUNT;
 static bool s_last_screen_on = true;
 static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单屏方案)
 
-static const char *const RISK_NAMES[APP_RISK_COUNT] = { "LOW RISK", "MEDIUM RISK", "HIGH RISK" };
+static const char *const RISK_NAMES[APP_RISK_COUNT] = { "低风险", "中风险", "高风险" };
 static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
 
 // ---- 基础块(无 LVGL 样式噪音) ----
@@ -91,7 +97,7 @@ static lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font
 
 static lv_obj_t *hint_label(lv_obj_t *parent, const char *text)
 {
-    return label(parent, text, &lv_font_montserrat_14, UI_MUTED, 0, HINT_Y, W);
+    return label(parent, text, &font_cn_14, UI_MUTED, 0, HINT_Y, W);
 }
 
 // ---- 基底屏:天空 + 云 + 草地(复用 ui_pixel 视觉语言) ----
@@ -137,27 +143,27 @@ static void build_chrome(void)
     lv_obj_set_style_radius(s_batt_icon, 3, 0);
     s_batt_nub = block(s_chrome, BATT_NUB_X, 10, BATT_NUB_W, 6, 0xFFFFFF);
     // 数字位置在 render 按真实字宽/字形高精确计算(batt_label_reposition):
-    // 实测 montserrat_14 数字字形高 10px,label 行高 16 → y=1 靠上视觉居中
-    s_batt_label = label(s_batt_icon, "--", &lv_font_montserrat_14, 0xFFFFFF,
+    // 实测 font_cn_14 数字字形高 10px,label 行高 16 → y=1 靠上视觉居中
+    s_batt_label = label(s_batt_icon, "--", &font_cn_14, 0xFFFFFF,
                          0, -2, BATT_W - 4);
-    s_time_label = label(s_chrome, "--:--", &lv_font_montserrat_14, 0xFFFFFF,
+    s_time_label = label(s_chrome, "--:--", &font_cn_14, 0xFFFFFF,
                          TIME_X, 5, TIME_W);
 
     // BLE 断线横幅(链路断时整宽显示;link_up = EVENT 特征已订阅)。
     // 文本是子 label(render 按通道名改写文案);banner 本体是 block,不能
     // 对 block 调 label_set_*(会按 label 布局读越界内存 → Load access fault)。
     s_offline_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_RED);
-    s_offline_text = label(s_offline_banner, "BLE DISCONNECTED - reconnecting...",
-                           &lv_font_montserrat_14, 0xFFFFFF, 0, 0, W);
+    s_offline_text = label(s_offline_banner, "已断开 - 正在重连...",
+                           &font_cn_14, 0xFFFFFF, 0, 0, W);
 
     // BLE BUSY(音频丢帧中)
     s_netbusy_banner = block(s_chrome, 0, BANNER_Y, W, BANNER_H, UI_ORANGE);
-    s_netbusy_text = label(s_netbusy_banner, "BLE BUSY - dropping frames",
-                           &lv_font_montserrat_14, UI_INK, 0, 0, W);
+    s_netbusy_text = label(s_netbusy_banner, "网络繁忙 - 正在丢帧",
+                           &font_cn_14, UI_INK, 0, 0, W);
 
     // Toast(底部浮层,空文本即隐藏)
     lv_obj_t *tbg = block(s_chrome, 30, 272, 180, 30, UI_INK);
-    s_toast = label(tbg, "", &lv_font_montserrat_14, 0xFFFFFF, 0, 5, 180);
+    s_toast = label(tbg, "", &font_cn_14, 0xFFFFFF, 0, 5, 180);
 }
 
 // ---- 各状态页 ----
@@ -175,10 +181,10 @@ static void build_home(void)
     lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
     // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
     // 后文字才真正水平居中于面板(此前偏右 7px)。
-    label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
+    label(plate, "语音输入", &font_cn_20, UI_INK, -7, -2, 200);
     ui_pixel_mascot_create(p->root, 101, 100);
-    label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
-    hint_label(p->root, "OK: ENTER   DBL-VOL+: CLEAR   DOWN: ENTER");
+    label(p->root, "按住确认键进入", &font_cn_14, UI_MUTED, 0, 200, W);
+    hint_label(p->root, "确认键:进入  双击音量+:清空  下键:回车");
 }
 
 static void build_ready(void)
@@ -193,8 +199,8 @@ static void build_ready(void)
     lv_obj_set_pos(p->root, 0, 0);
 
     // 工作流切换已取消(固定 build),READY 为简单就绪页
-    label(p->root, "READY", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 24, W);
-    hint_label(p->root, "HOLD VOL+: SPEAK   DOWN: ENTER   DBL-VOL+: CLEAR");
+    label(p->root, "就绪", &font_cn_20, UI_INK, 0, CONTENT_Y + 24, W);
+    hint_label(p->root, "按住音量+:说话  下键:回车  双击音量+:清空");
 }
 
 static void build_listening(void)
@@ -210,10 +216,10 @@ static void build_listening(void)
 
     // 录音中不画图标, 直接文字:RECORDING 大字居中(原图标区 y58-131 的中心),
     // 简洁直观; 下方 "0s" 计时与 hint 保持。
-    p->rec_label = label(p->root, "RECORDING", &lv_font_montserrat_20, UI_INK, 0, 86, W);
+    p->rec_label = label(p->root, "录音中", &font_cn_20, UI_INK, 0, 86, W);
 
-    p->rec_elapsed = label(p->root, "0s", &lv_font_montserrat_20, UI_INK, 0, 200, W);
-    hint_label(p->root, "RELEASE VOL+: SEND");
+    p->rec_elapsed = label(p->root, "0s", &font_cn_20, UI_INK, 0, 200, W);
+    hint_label(p->root, "松开音量+:发送");
 }
 
 static void build_transcribing(void)
@@ -227,9 +233,9 @@ static void build_transcribing(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    label(p->root, "Transcribing...", &lv_font_montserrat_20, UI_INK, 0, 96, W);
-    p->tr_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 140, 200);
-    hint_label(p->root, "PLEASE WAIT");
+    label(p->root, "转写中...", &font_cn_20, UI_INK, 0, 96, W);
+    p->tr_message = label(p->root, "", &font_cn_14, UI_MUTED, 20, 140, 200);
+    hint_label(p->root, "请稍候");
 }
 
 static void build_running(void)
@@ -244,11 +250,11 @@ static void build_running(void)
     lv_obj_set_pos(p->root, 0, 0);
 
     block(p->root, 108, 76, 24, 24, UI_SKY_DARK);              // 静态"spinner"块
-    p->run_state = label(p->root, "running", &lv_font_montserrat_20, UI_INK,
+    p->run_state = label(p->root, "处理中", &font_cn_20, UI_INK,
                          0, 112, W);
-    p->run_message = label(p->root, "", &lv_font_montserrat_14, UI_MUTED,
+    p->run_message = label(p->root, "", &font_cn_14, UI_MUTED,
                            20, 148, 200);
-    hint_label(p->root, "AGENT WORKING...");
+    hint_label(p->root, "正在处理...");
 }
 
 static void build_approval(void)
@@ -263,20 +269,22 @@ static void build_approval(void)
     lv_obj_set_pos(p->root, 0, 0);
 
     p->ap_risk_banner = block(p->root, 20, CONTENT_Y + 8, 200, 28, UI_GRASS);
-    p->ap_risk_label = label(p->ap_risk_banner, "", &lv_font_montserrat_14, UI_INK,
+    p->ap_risk_label = label(p->ap_risk_banner, "", &font_cn_14, UI_INK,
                              0, 5, 200);
 
-    p->ap_title = label(p->root, "", &lv_font_montserrat_20, UI_INK, 20, 108, 200);
+    // title 是 relay 下行任意文本(非固定词),用全量 14px 字库防缺字
+    p->ap_title = label(p->root, "", &font_cn_14, UI_INK, 20, 106, 200);
     lv_obj_set_style_text_align(p->ap_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(p->ap_title, &font_cn_14, 0);
     lv_label_set_long_mode(p->ap_title, LV_LABEL_LONG_WRAP);
 
-    p->ap_target = label(p->root, "", &lv_font_montserrat_14, UI_SKY_DARK, 20, 150, 200);
-    p->ap_diff = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 176, 200);
+    p->ap_target = label(p->root, "", &font_cn_14, UI_SKY_DARK, 20, 150, 200);
+    p->ap_diff = label(p->root, "", &font_cn_14, UI_MUTED, 20, 176, 200);
     lv_obj_set_style_text_align(p->ap_diff, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
     lv_obj_set_height(p->ap_diff, 88);
 
-    hint_label(p->root, "OK: APPROVE   VOL+: REJECT   DOWN: ENTER");
+    hint_label(p->root, "确认键:同意  音量+:拒绝  下键:回车");
 }
 
 static void set_hidden(lv_obj_t *o, bool hidden)
@@ -369,9 +377,9 @@ void app_ui_render(const app_ui_snapshot_t *snap)
 
     // 横幅互斥:OFFLINE(通道断线)> BUSY(同位置 BANNER_Y)
     // 文案按当前链路通道渲染(BLE/USB;断线横幅显示 link_name 字样)
-    label_set_fmt_if_changed(s_offline_text, "%s DISCONNECTED - reconnecting...",
+    label_set_fmt_if_changed(s_offline_text, "%s 已断开 - 正在重连...",
                              snap->link_name);
-    label_set_fmt_if_changed(s_netbusy_text, "%s BUSY - dropping frames",
+    label_set_fmt_if_changed(s_netbusy_text, "%s 网络繁忙 - 正在丢帧",
                              snap->link_name);
     set_hidden(s_offline_banner, snap->link_up);
     set_hidden(s_netbusy_banner, !snap->net_busy || !snap->link_up);
@@ -407,7 +415,7 @@ void app_ui_render(const app_ui_snapshot_t *snap)
                                   lv_color_hex(RISK_COLORS[r]), 0);
         label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_risk_label, RISK_NAMES[r]);
         label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_title, snap->approval_title);
-        label_set_fmt_if_changed(s_pages[APP_ST_APPROVAL].ap_target, "target: %s",
+        label_set_fmt_if_changed(s_pages[APP_ST_APPROVAL].ap_target, "目标: %s",
                                  snap->approval_target);
         label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_diff, snap->approval_diff);
         break;

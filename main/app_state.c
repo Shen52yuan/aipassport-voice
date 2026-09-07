@@ -92,11 +92,11 @@ static bool key_ev_is_fake(const app_event_t *ev) {
 }
 
 static const char *const AGENT_STATE_NAMES[APP_AGENT_COUNT] = {
-    [APP_AGENT_READY]    = "ready",
-    [APP_AGENT_THINKING] = "thinking",
-    [APP_AGENT_RUNNING]  = "running",
-    [APP_AGENT_ERROR]    = "error",
-    [APP_AGENT_DONE]     = "done",
+    [APP_AGENT_READY]    = "待命",
+    [APP_AGENT_THINKING] = "思考中",
+    [APP_AGENT_RUNNING]  = "处理中",
+    [APP_AGENT_ERROR]    = "出错",
+    [APP_AGENT_DONE]     = "完成",
 };
 
 void app_state_init(app_state_t *s) {
@@ -173,7 +173,7 @@ static void send_key_action(app_state_t *s, app_key_action_t action,
 static void start_ptt(app_state_t *s, uint64_t now_ms,
                       app_action_t *out, uint8_t *n, uint8_t max) {
     if (!s->link_up) {
-        set_toast(s, now_ms, "OFFLINE - PTT blocked");
+        set_toast(s, now_ms, "已离线 - 按键被禁用");
         app_action_t t = { .type = APP_ACT_PLAY_TONE };
         t.u.tone = APP_TONE_ERROR;
         emit(out, n, max, t);
@@ -401,7 +401,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, n, max, a);
             s->state = APP_ST_AGENT_RUNNING;
             s->state_since_ms = now_ms;
-            str_cpy(s->agent_message, sizeof(s->agent_message), "Approved, agent continues...");
+            str_cpy(s->agent_message, sizeof(s->agent_message), "已同意, 继续处理...");
             s->transcript_final = true;   // 非转写文本,无预览光标
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
@@ -415,7 +415,7 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             emit(out, n, max, t);
             s->state = APP_ST_AGENT_RUNNING;
             s->state_since_ms = now_ms;
-            str_cpy(s->agent_message, sizeof(s->agent_message), "Rejected by user");
+            str_cpy(s->agent_message, sizeof(s->agent_message), "用户已拒绝");
             s->transcript_final = true;   // 非转写文本,无预览光标
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
@@ -496,12 +496,12 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
         break;
     case APP_ST_TRANSCRIBING:
         if (elapsed >= APP_TRANSCRIBE_TIMEOUT) {
-            abort_to_ready(s, now_ms, "STT timeout", out, n, max);
+            abort_to_ready(s, now_ms, "转写超时", out, n, max);
         }
         break;
     case APP_ST_AGENT_RUNNING:
         if (elapsed >= APP_AGENT_RUN_TIMEOUT) {
-            abort_to_ready(s, now_ms, "Agent timeout", out, n, max);
+            abort_to_ready(s, now_ms, "处理超时", out, n, max);
         }
         break;
     default:
@@ -571,7 +571,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
                 s->state = APP_ST_READY;
                 s->state_since_ms = now_ms;
             } else if (st == APP_AGENT_ERROR) {
-                abort_to_ready(s, now_ms, "Agent error", out, out_n, max);
+                abort_to_ready(s, now_ms, "处理出错", out, out_n, max);
             }
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, out_n, max, r);
@@ -674,7 +674,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             // (横幅显示),link_up=false。另一通道断开不影响本会话(上方
             // 分支不成立时仅刷新图标)。
             s->link_up = false;
-            handle_link_down(s, now_ms, "Mac disconnected", out, out_n, max);
+            handle_link_down(s, now_ms, "电脑已断开", out, out_n, max);
             if (mode_channel_up(APP_CHAN_USB)) {
                 s->link_channel = APP_CHAN_USB;
                 s->link_up = true;
@@ -687,7 +687,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_EV_BLE_DROP:
-        set_toast(s, now_ms, "BLE event dropped");
+        set_toast(s, now_ms, "事件丢帧");
         {
             app_action_t br = { .type = APP_ACT_UI_REFRESH };
             emit(out, out_n, max, br);
@@ -708,7 +708,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
             emit(out, out_n, max, v);
         }
-        set_toast(s, now_ms, "Audio error");
+        set_toast(s, now_ms, "音频出错");
         abort_to_ready(s, now_ms, NULL, out, out_n, max);
         break;
 
@@ -757,7 +757,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         if (s->link_channel == APP_CHAN_USB) {
             s->link_up = false;
             // 状态收束与 BLE 断连同路径;toast 文案区分通道
-            handle_link_down(s, now_ms, "USB disconnected", out, out_n, max);
+            handle_link_down(s, now_ms, "USB 已断开", out, out_n, max);
             if (mode_channel_up(APP_CHAN_BLE)) {
                 s->link_channel = APP_CHAN_BLE;
                 s->link_up = true;

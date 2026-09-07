@@ -17,6 +17,9 @@ idf_component_register(
          "mode.c"
          "usb_link.c"
          "usb_link_framing.c"
+         # v0.1.0 汉化:内嵌中文字库(lv_font_conv 生成,Noto Sans CJK SC/OFL)
+         "fonts/font_cn_14.c"
+         "fonts/font_cn_20.c"
     INCLUDE_DIRS "."
     REQUIRES bsp
              json
