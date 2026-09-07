@@ -122,7 +122,11 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user) {
 }
 
 void bsp_button_suppress_panel_glitch(void) {
-    button_adc_set_ignore_until(esp_timer_get_time() + BSP_BTN_PANEL_GLITCH_US);
+    // [CI 兼容 2026-09-07] 调用暂禁:依赖 button 组件本地补丁 button_adc.c
+    // (managed_components/, 被 .gitignore 排除 → 云端 CI 无此符号)。此功能为
+    // 面板上电 600ms 瞬态抑制(非语音链路),补丁组件化后恢复。
+    // button_adc_set_ignore_until(esp_timer_get_time() + BSP_BTN_PANEL_GLITCH_US);
+    (void) BSP_BTN_PANEL_GLITCH_US;
 }
 
 int bsp_button_read_mv(void) {

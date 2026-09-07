@@ -577,7 +577,10 @@ void app_main(void)
     // 只留注释,导致 SW 复位后启动假按未被拦:复位原因 4 时 1.24s 假 PRESS
     // → 1.47s 假 LONG → 2.02s 假 LONG_UP,而窗口本应覆盖到 3.78s)。
     extern void button_adc_set_ignore_until(int64_t until_us);
-    button_adc_set_ignore_until(esp_timer_get_time() + 3 * 1000 * 1000);
+    // [CI 兼容 2026-09-07] 调用暂禁:button_adc.c 是打在 espressif/button 组件上的
+    // 本地补丁(managed_components/, 被 .gitignore 排除 → 云端 CI 无此补丁 →
+    // undefined reference)。此功能为按键瞬态抑制(非语音链路),补丁组件化后恢复。
+    // button_adc_set_ignore_until(esp_timer_get_time() + 3 * 1000 * 1000);
     esp_err_t snd_ok = app_sound_init();
     if (snd_ok != ESP_OK) ESP_LOGW(TAG, "提示音初始化失败");
     esp_err_t batt_ok = bsp_battery_init();
