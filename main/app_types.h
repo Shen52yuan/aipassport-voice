@@ -24,8 +24,20 @@ typedef enum {
     APP_ST_TRANSCRIBING,    // 等待 Mac 转写
     APP_ST_AGENT_RUNNING,   // Agent 执行中
     APP_ST_APPROVAL,        // 待物理审批
+    // v0.2.0 三场景 + 分段录入(2026-09-08):
+    APP_ST_SCENE_SELECT,    // 场景选择(同事/领导客户/对AI)
+    APP_ST_SEG_WAIT,        // 段间等待(本段定稿已预览;可续录/结束录入)
+    APP_ST_MERGE_REVIEW,    // 合并整理稿确认(OK 注入 / 放弃)
     APP_ST_COUNT,
 } app_stage_t;
+
+// v0.2.0 场景(与 relay refine_preset 对应,字符串互转在 app_protocol.c)
+typedef enum {
+    APP_SCENE_WORK = 0,     // ① 同事(work_wechat)
+    APP_SCENE_REPORT,       // ② 领导/客户(report_boss)
+    APP_SCENE_AGENT,        // ③ 对 AI / vibe(agent_prompt)
+    APP_SCENE_COUNT,
+} app_scene_t;
 
 // ---------------- 按键 ----------------
 // 物理键语义(2026-08-29):UP(音量加)= 按下即录、松开发送(按住说话);
@@ -71,6 +83,10 @@ typedef enum {
     APP_EV_USB_CONNECTED,   // USB 会话通(收到 PC 握手 ping;link_up 的 USB 侧充分条件)
     APP_EV_USB_DISCONNECTED, // USB 会话断(拔线:is_connected 翻转)
     APP_EV_TIME_SET,         // 校时下行(epoch 秒 UTC;双通道共用:CTRL time.set 行 + SYS time set)
+    // ---- v0.2.0 三场景 + 分段录入下行(2026-09-08)----
+    APP_EV_SCENE_SET,        // 下行 scene.set:Mac 确认场景切换生效(存当前场景)
+    APP_EV_SEGMENT_READY,    // 下行 segment.ready:本段定稿已录(显示第 N 段预览)
+    APP_EV_MERGE_RESULT,     // 下行 merge.result:多段综合整理稿(等 OK 确认注入)
 } app_event_type_t;
 
 // ---------------- 链路通道(双通道常开架构,2026-08-28) ----------------
@@ -148,6 +164,16 @@ typedef struct {
             bool final;                                 // false=预览态(未定稿);true=定稿落定
         } transcript;                                   // TRANSCRIPT
         struct { int64_t epoch; } time_set;             // TIME_SET(UTC 秒,int64 对齐 8,union 仍 ≤228B)
+        // ---- v0.2.0 (均复用 text 缓冲, 不超 union 上限) ----
+        struct { uint8_t scene; } scene_set;            // SCENE_SET(app_scene_t)
+        struct {
+            uint8_t index;                              // 已录段序号 1..3
+            char text[APP_TRANSCRIPT_MAX];              // 本段定稿文本(设备屏预览)
+        } segment_ready;                                // SEGMENT_READY
+        struct {
+            char text[APP_AGENT_MSG_MAX];               // 合并整理稿(设备屏显示)
+            bool has_text;                              // 有内容(true)/空(放弃)
+        } merge_result;                                 // MERGE_RESULT
     } u;
 } app_event_t;
 
@@ -168,6 +194,10 @@ typedef enum {
     APP_ACT_STREAM_CANCEL,   // 取消/断链:停采集 + 清空 ring + 丢弃在途帧(与 STOP 区别:不排空发送)
     APP_ACT_PLAY_TONE,
     APP_ACT_TIME_SET,        // time_sync_set_epoch(校时落地)
+    // ---- v0.2.0 上行(三场景 + 分段录入,2026-09-08)----
+    APP_ACT_SEND_SCENE_SELECT,   // 上行 scene.select(用户确认场景,带 app_scene_t)
+    APP_ACT_SEND_RECORDING_DONE, // 上行 recording.done(用户按 OK 结束分段录入)
+    APP_ACT_SEND_INJECT_CONFIRM, // 上行 inject.confirm(整理稿页 OK/放弃,带 bool)
 } app_action_type_t;
 
 // 单事件最多产出的动作数。emit() 满了就静默丢弃,所以这个值必须 ≥ 最长的
@@ -189,6 +219,8 @@ typedef struct {
             uint8_t decision;                           // app_approval_decision_t
         } agent_action;                                 // SEND_AGENT_ACTION
         struct { int64_t epoch; } time_set;             // TIME_SET
+        struct { uint8_t scene; } scene_select;         // SEND_SCENE_SELECT(app_scene_t)
+        struct { bool ok; } inject_confirm;             // SEND_INJECT_CONFIRM
     } u;
 } app_action_t;
 
@@ -213,6 +245,12 @@ typedef struct {
     uint8_t        approval_risk;   // app_risk_t
     uint32_t       elapsed_ms;      // 当前状态已持续时长(主循环在快照时补)
     char           toast[APP_TOAST_MAX];
+    // ---- v0.2.0 三场景 + 分段录入(2026-09-08)----
+    uint8_t        scene;           // 当前场景(app_scene_t, READY 顶栏标签)
+    uint8_t        scene_cursor;    // 场景选择页高亮光标(0..APP_SCENE_COUNT-1)
+    uint8_t        seg_index;       // 已录段数/当前段号 0..3(SEG_WAIT 显示 第N段)
+    char           seg_preview[APP_AGENT_MSG_MAX];  // 最近一段定稿预览(SEG_WAIT)
+    char           merge_text[APP_AGENT_MSG_MAX];   // 合并整理稿(MERGE_REVIEW)
 } app_ui_snapshot_t;
 
 // ---------------- 超时常量 ----------------

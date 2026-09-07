@@ -122,6 +122,56 @@ static bool parse_time_set(const cJSON *o, app_event_t *ev) {
     return true;
 }
 
+// ---- v0.2.0 下行解析(三场景 + 分段录入) ----
+static bool parse_scene_set(const cJSON *o, app_event_t *ev) {
+    const cJSON *sc = cJSON_GetObjectItemCaseSensitive(o, "scene");
+    if (!cJSON_IsString(sc)) return false;
+    ev->u.scene_set.scene = app_protocol_scene_from_str(sc->valuestring);
+    ev->type = APP_EV_SCENE_SET;
+    return true;
+}
+
+static bool parse_segment_ready(const cJSON *o, app_event_t *ev) {
+    const cJSON *tx = cJSON_GetObjectItemCaseSensitive(o, "text");
+    if (!cJSON_IsString(tx)) return false;
+    str_take(ev->u.segment_ready.text, sizeof(ev->u.segment_ready.text),
+             tx->valuestring);
+    const cJSON *ix = cJSON_GetObjectItemCaseSensitive(o, "index");
+    int idx = (cJSON_IsNumber(ix)) ? (int)ix->valueint : 1;
+    if (idx < 1) idx = 1;
+    if (idx > 3) idx = 3;
+    ev->u.segment_ready.index = (uint8_t)idx;
+    ev->type = APP_EV_SEGMENT_READY;
+    return true;
+}
+
+static bool parse_merge_result(const cJSON *o, app_event_t *ev) {
+    const cJSON *tx = cJSON_GetObjectItemCaseSensitive(o, "text");
+    if (!cJSON_IsString(tx)) return false;
+    str_take(ev->u.merge_result.text, sizeof(ev->u.merge_result.text),
+             tx->valuestring);
+    ev->u.merge_result.has_text = (tx->valuestring[0] != '\0');
+    ev->type = APP_EV_MERGE_RESULT;
+    return true;
+}
+
+// 场景 ↔ 协议字符串
+app_scene_t app_protocol_scene_from_str(const char *s) {
+    if (s) {
+        if (strcmp(s, "report_boss") == 0) return APP_SCENE_REPORT;
+        if (strcmp(s, "agent_prompt") == 0) return APP_SCENE_AGENT;
+    }
+    return APP_SCENE_WORK;   // work_wechat(默认)或未知 → 同事
+}
+
+const char *app_protocol_scene_to_str(app_scene_t scene) {
+    switch (scene) {
+    case APP_SCENE_REPORT: return "report_boss";
+    case APP_SCENE_AGENT:  return "agent_prompt";
+    default:               return "work_wechat";
+    }
+}
+
 bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
     if (!json || len == 0 || len > APP_PROTO_RX_CAP) return false;
     if (!json_depth_ok(json, len)) return false;   // 深层嵌套:拒绝,保护解析者栈
@@ -134,6 +184,9 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
         else if (strcmp(type->valuestring, "agent.approval_request") == 0) ok = parse_approval(root, ev);
         else if (strcmp(type->valuestring, "transcript") == 0)           ok = parse_transcript(root, ev);
         else if (strcmp(type->valuestring, "time.set") == 0)             ok = parse_time_set(root, ev);
+        else if (strcmp(type->valuestring, "scene.set") == 0)            ok = parse_scene_set(root, ev);
+        else if (strcmp(type->valuestring, "segment.ready") == 0)        ok = parse_segment_ready(root, ev);
+        else if (strcmp(type->valuestring, "merge.result") == 0)         ok = parse_merge_result(root, ev);
         // 未知 type:丢弃(返回 false,调用方记日志)
     }
     cJSON_Delete(root);
@@ -223,6 +276,33 @@ size_t app_protocol_agent_action(char *buf, size_t cap, const char *task_id,
     if (decision == APP_ACTION_APPROVE) act = "approve";
     else if (decision == APP_ACTION_REJECT) act = "reject";
     cJSON_AddStringToObject(o, "action", act);
+    size_t n = serialize(o, buf, cap);
+    cJSON_Delete(o);
+    return n;
+}
+
+// ---- v0.2.0 上行序列化(三场景 + 分段录入) ----
+size_t app_protocol_scene_select(char *buf, size_t cap, app_scene_t scene) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "event", "scene.select");
+    cJSON_AddStringToObject(o, "scene", app_protocol_scene_to_str(scene));
+    size_t n = serialize(o, buf, cap);
+    cJSON_Delete(o);
+    return n;
+}
+
+size_t app_protocol_recording_done(char *buf, size_t cap) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "event", "recording.done");
+    size_t n = serialize(o, buf, cap);
+    cJSON_Delete(o);
+    return n;
+}
+
+size_t app_protocol_inject_confirm(char *buf, size_t cap, bool ok) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "event", "inject.confirm");
+    cJSON_AddBoolToObject(o, "ok", ok);
     size_t n = serialize(o, buf, cap);
     cJSON_Delete(o);
     return n;

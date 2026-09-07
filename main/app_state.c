@@ -111,6 +111,10 @@ void app_state_init(app_state_t *s) {
     s->link_channel = APP_CHAN_BLE;   // 缺省 BLE(首通道连接前 PTT 门禁靠 link_up)
     s->locked = false;             // 开机未锁定
     s->wake_ms = 0;                // 无唤醒史 → 首个 OK LONG 不受 guard 限制
+    // v0.2.0: 默认场景 = 同事(与 relay refine_preset 默认一致)
+    s->scene = APP_SCENE_WORK;
+    s->scene_cursor = 0;
+    s->seg_index = 0;
 }
 
 static void emit(app_action_t *out, uint8_t *n, uint8_t max, app_action_t a) {
@@ -149,6 +153,12 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     str_cpy(snap->approval_target, sizeof(snap->approval_target), s->approval_target);
     str_cpy(snap->approval_diff, sizeof(snap->approval_diff), s->approval_diff);
     snap->approval_risk    = s->approval_risk;
+    // v0.2.0 三场景 + 分段录入字段透传
+    snap->scene            = s->scene;
+    snap->scene_cursor     = s->scene_cursor;
+    snap->seg_index        = s->seg_index;
+    str_cpy(snap->seg_preview, sizeof(snap->seg_preview), s->seg_preview);
+    str_cpy(snap->merge_text, sizeof(snap->merge_text), s->merge_text);
     if (s->toast[0] && s->toast_until_ms > 0) {
         str_cpy(snap->toast, sizeof(snap->toast), s->toast);
     }
@@ -332,10 +342,43 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
 
     switch (s->state) {
     case APP_ST_HOME:
+        // v0.2.0: OK 单击 → 场景选择页(入口层级: 主页 → 选场景 → 就绪)
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
-            go_ready(s, now_ms, out, n, max);
+            s->state = APP_ST_SCENE_SELECT;
+            s->state_since_ms = now_ms;
+            s->scene_cursor = s->scene;   // 停在当前场景(不是从头)
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_UP &&
+                   !key_ev_is_fake(ev)) {
+            // 快捷进 READY(跳过选场景, 用上次场景): 口袋盲操作
+            go_ready(s, now_ms, out, n, max);
+        }
+        break;
+
+    case APP_ST_SCENE_SELECT:
+        // 场景选择: UP/DOWN 移光标(折返), OK 选中 → 上行 scene.select → READY
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+            s->scene_cursor = (s->scene_cursor + 1) % APP_SCENE_COUNT;
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP) {
+            s->scene_cursor = (s->scene_cursor + APP_SCENE_COUNT - 1)
+                              % APP_SCENE_COUNT;
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            s->scene = s->scene_cursor;
+            app_action_t a = { .type = APP_ACT_SEND_SCENE_SELECT };
+            a.u.scene_select.scene = s->scene;
+            emit(out, n, max, a);
+            // 轻提示音: 场景选中确认
+            app_action_t t = { .type = APP_ACT_PLAY_TONE };
+            t.u.tone = APP_TONE_SUCCESS;
+            emit(out, n, max, t);
+            go_ready(s, now_ms, out, n, max);
         }
         break;
 
@@ -380,13 +423,21 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         if ((ev->type == APP_EV_KEY_LONG_UP || ev->type == APP_EV_KEY_RELEASE) &&
             b == APP_BTN_UP) {
             // 误触收口:不足 PTT_MIN_TALK_MS 就松手 = 误碰或轻点,里面不可能有
-            // 语音。丢掉音频、把会话收束回 READY,不进转写。
+            // 语音。丢掉音频、把会话收束(不进转写)。v0.2.0: 分段录入中途的
+            // 误触不丢已录段 —— 有段回 SEG_WAIT, 无段回 READY。
             if (now_ms - s->state_since_ms < PTT_MIN_TALK_MS) {
                 app_action_t c = { .type = APP_ACT_STREAM_CANCEL };
                 emit(out, n, max, c);   // 幂等:滴声未播完时甚至还没开流
                 app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
                 emit(out, n, max, v);   // 会话必须收束,否则 Mac 侧挂着未结束的 voice
-                go_ready(s, now_ms, out, n, max);
+                if (s->seg_index > 0) {
+                    s->state = APP_ST_SEG_WAIT;
+                    s->state_since_ms = now_ms;
+                    app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                    emit(out, n, max, r);
+                } else {
+                    go_ready(s, now_ms, out, n, max);
+                }
                 break;
             }
             end_ptt(s, now_ms, out, n, max);
@@ -425,15 +476,80 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_ST_TRANSCRIBING:
-        // 音量+单击:退出转写场景(2026-08-28 用户需求)——不等识别结果,直接
-        // 回 READY。迟到的识别文本由 APP_EV_TRANSCRIPT 的 READY/HOME 门禁丢弃。
+        // 音量+单击:退出转写场景(2026-08-28 用户需求)——不等识别结果。
+        // v0.2.0: 分段模式下有已录段 → 回 SEG_WAIT(可续录/结束); 无 → READY。
         // 真实单击的 PRESS 回调 mv=3-5(手指在键上);假按的 PRESS 读数落在别的
         // 分压档(2890 松开电平 / 598 跨档)→ 用 PRESS 读数区分真假单击(CLICK
         // 回调时刻用户已松手,mv 恒 2890,不可用)。按下即录不影响这里:转写态
-        // 没有 PRESS 分支,新会话只能从 READY 起。
+        // 没有 PRESS 分支,新会话只能从 READY/SEG_WAIT 起。
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP &&
             s->last_up_press_mv <= PTT_UP_PRESS_MAX_MV) {
-            abort_to_ready(s, now_ms, NULL, out, n, max);
+            if (s->seg_index > 0) {
+                s->state = APP_ST_SEG_WAIT;
+                s->state_since_ms = now_ms;
+                app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                emit(out, n, max, r);
+            } else {
+                abort_to_ready(s, now_ms, NULL, out, n, max);
+            }
+        }
+        break;
+
+    case APP_ST_SEG_WAIT:
+        // v0.2.0 段间等待(本段定稿已预览): 
+        //   UP 按下 → 续录第 N+1 段(进 LISTENING, 与 READY 同路径);
+        //   OK 单击 → 结束录入(上行 recording.done, 等 merge.result 进 MERGE_REVIEW);
+        //   DOWN 长按清空仍在上面全局分支处理(丢弃全部段)。
+        if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP &&
+            !key_ev_is_fake(ev) && s->link_up) {
+            if (s->seg_index >= 3) {
+                set_toast(s, now_ms, "已达 3 段上限");
+                app_action_t t = { .type = APP_ACT_PLAY_TONE };
+                t.u.tone = APP_TONE_ERROR;
+                emit(out, n, max, t);
+                break;
+            }
+            start_ptt(s, now_ms, out, n, max);   // 进 LISTENING(滴声+开流)
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            app_action_t a = { .type = APP_ACT_SEND_RECORDING_DONE };
+            emit(out, n, max, a);
+            s->state = APP_ST_AGENT_RUNNING;   // 等 Mac 综合整理(复用 RUNNING 页)
+            s->state_since_ms = now_ms;
+            s->agent_state_name[0] = '\0';
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
+        }
+        break;
+
+    case APP_ST_MERGE_REVIEW:
+        // v0.2.0 合并整理稿确认页:
+        //   OK 单击 → inject.confirm ok:true(注入输入框) → READY;
+        //   UP 单击 → inject.confirm ok:false(放弃) → READY;
+        //   DOWN 单击 → 回车(保留);  DOWN 长按清空在全局分支。
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            app_action_t a = { .type = APP_ACT_SEND_INJECT_CONFIRM };
+            a.u.inject_confirm.ok = true;
+            emit(out, n, max, a);
+            s->seg_index = 0;
+            s->seg_preview[0] = '\0';
+            s->merge_text[0] = '\0';
+            app_action_t t = { .type = APP_ACT_PLAY_TONE };
+            t.u.tone = APP_TONE_SUCCESS;
+            emit(out, n, max, t);
+            go_ready(s, now_ms, out, n, max);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP) {
+            app_action_t a = { .type = APP_ACT_SEND_INJECT_CONFIRM };
+            a.u.inject_confirm.ok = false;
+            emit(out, n, max, a);
+            s->seg_index = 0;
+            s->seg_preview[0] = '\0';
+            s->merge_text[0] = '\0';
+            app_action_t t = { .type = APP_ACT_PLAY_TONE };
+            t.u.tone = APP_TONE_REJECT;
+            emit(out, n, max, t);
+            go_ready(s, now_ms, out, n, max);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+            send_key_action(s, APP_KEY_ENTER, out, n, max);
         }
         break;
 
@@ -523,6 +639,14 @@ static void handle_link_down(app_state_t *s, uint64_t now_ms, const char *toast,
         break;
     case APP_ST_TRANSCRIBING:
     case APP_ST_AGENT_RUNNING:
+    case APP_ST_SCENE_SELECT:
+    case APP_ST_SEG_WAIT:
+    case APP_ST_MERGE_REVIEW:
+        // v0.2.0: 断链时清掉未完成的分段状态(段 buffer 在 Mac 侧,
+        // 断链后重连按新会话处理, 设备不留半截状态)
+        s->seg_index = 0;
+        s->seg_preview[0] = '\0';
+        s->merge_text[0] = '\0';
         abort_to_ready(s, now_ms, NULL, out, n, max);
         break;
     default: {
@@ -582,7 +706,54 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
     }
 
-    case APP_EV_APPROVAL_REQUEST:
+    // ---- v0.2.0 三场景 + 分段录入下行事件 ----
+    case APP_EV_SCENE_SET: {
+        // Mac 确认场景切换生效:存场景(与本地选择一致,兜底 relay 重启场景)
+        if (ev->u.scene_set.scene < APP_SCENE_COUNT) {
+            s->scene = ev->u.scene_set.scene;
+            s->scene_cursor = s->scene;
+        }
+        app_action_t r = { .type = APP_ACT_UI_REFRESH };
+        emit(out, out_n, max, r);
+        break;
+    }
+
+    case APP_EV_SEGMENT_READY: {
+        // 本段转写定稿已下行: 存段预览 + 进 SEG_WAIT(可续录/结束录入)
+        // 仅当设备在"等定稿"态(TRANSCRIBING/AGENT_RUNNING)时接收;
+        // 用户已退出(READY/HOME)的迟到帧丢弃。
+        if (s->state == APP_ST_TRANSCRIBING ||
+            s->state == APP_ST_AGENT_RUNNING ||
+            s->state == APP_ST_SEG_WAIT) {
+            uint8_t idx = ev->u.segment_ready.index;
+            if (idx >= 1 && idx <= 3) s->seg_index = idx;
+            else s->seg_index = (s->seg_index < 3) ? s->seg_index + 1 : 3;
+            str_cpy(s->seg_preview, sizeof(s->seg_preview),
+                    ev->u.segment_ready.text);
+            s->state = APP_ST_SEG_WAIT;
+            s->state_since_ms = now_ms;
+            s->agent_state_name[0] = '\0';
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, r);
+        }
+        break;
+    }
+
+    case APP_EV_MERGE_RESULT: {
+        // 多段综合整理稿下行: 存稿 + 进 MERGE_REVIEW(OK 注入 / UP 放弃)
+        str_cpy(s->merge_text, sizeof(s->merge_text), ev->u.merge_result.text);
+        s->state = APP_ST_MERGE_REVIEW;
+        s->state_since_ms = now_ms;
+        s->agent_state_name[0] = '\0';
+        app_action_t t = { .type = APP_ACT_PLAY_TONE };
+        t.u.tone = APP_TONE_APPROVAL;   // 提醒: 有稿待确认
+        emit(out, out_n, max, t);
+        app_action_t r = { .type = APP_ACT_UI_REFRESH };
+        emit(out, out_n, max, r);
+        break;
+    }
+
+    case APP_EV_APPROVAL_REQUEST: {
         // 锁定态收到审批:强制解锁亮屏 —— 审批必须被看见,防口袋盲批
         // (与"APPROVAL 常亮不熄屏"政策一致)。
         if (s->locked) {
@@ -614,6 +785,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         app_action_t r = { .type = APP_ACT_UI_REFRESH };
         emit(out, out_n, max, r);
         break;
+    }
 
     case APP_EV_TRANSCRIPT:
         // 注入已迁 Mac 端,设备只做转写文本显示。退出转写(音量+单击回 READY)

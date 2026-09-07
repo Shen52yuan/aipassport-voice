@@ -246,6 +246,21 @@ static void run_actions(const app_action_t *acts, uint8_t n)
                                             a->u.agent_action.decision);
             send_event_line(buf, len);
             break;
+        // ---- v0.2.0 上行(三场景 + 分段录入) ----
+        case APP_ACT_SEND_SCENE_SELECT:
+            len = app_protocol_scene_select(buf, sizeof(buf),
+                                            (app_scene_t)a->u.scene_select.scene);
+            send_event_line_important(buf, len);   // 场景切换边界帧:不丢
+            break;
+        case APP_ACT_SEND_RECORDING_DONE:
+            len = app_protocol_recording_done(buf, sizeof(buf));
+            send_event_line_important(buf, len);   // 结束录入边界帧:不丢
+            break;
+        case APP_ACT_SEND_INJECT_CONFIRM:
+            len = app_protocol_inject_confirm(buf, sizeof(buf),
+                                              a->u.inject_confirm.ok);
+            send_event_line(buf, len);
+            break;
         case APP_ACT_STREAM_START:
             // 新会话:清零对账计数(上一次会话若断链无 voice.end,计数在此丢弃)
             s_last_drop_count = 0;

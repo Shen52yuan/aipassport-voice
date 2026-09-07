@@ -47,6 +47,15 @@ typedef struct {
     lv_obj_t *ap_title;                   // APPROVAL:标题
     lv_obj_t *ap_target;                  // APPROVAL:目标
     lv_obj_t *ap_diff;                    // APPROVAL:摘要/详情
+    // ---- v0.2.0 三场景 + 分段录入 ----
+    lv_obj_t *sc_row_block[3];            // SCENE_SELECT:高亮块(当前项)
+    lv_obj_t *sc_row_label[3];            // SCENE_SELECT:三行场景名
+    lv_obj_t *seg_title;                  // SEG_WAIT:第 N 段标题
+    lv_obj_t *seg_text;                   // SEG_WAIT:本段预览文字
+    lv_obj_t *seg_hint;                   // SEG_WAIT:按键提示(动态:可续/已达上限)
+    lv_obj_t *mr_title;                   // MERGE_REVIEW:整理稿标题
+    lv_obj_t *mr_text;                    // MERGE_REVIEW:整理稿全文
+    lv_obj_t *ready_scene;                // READY:当前场景小标签(顶栏下)
 } page_t;
 
 static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
@@ -67,6 +76,13 @@ static lv_obj_t *s_bg;   // 基底屏:所有状态页都是它的子对象(单�
 
 static const char *const RISK_NAMES[APP_RISK_COUNT] = { "低风险", "中风险", "高风险" };
 static const uint32_t RISK_COLORS[APP_RISK_COUNT] = { UI_GRASS, UI_YELLOW, UI_RED };
+
+// v0.2.0: 三场景名(场景选择页行文本 + READY 顶栏场景小标签共用)。
+// 定义置于文件顶部:build_ready 与 build_scene_select 都在使用,
+// C 要求先声明后使用。
+static const char *const SCENE_NAMES[APP_SCENE_COUNT] = {
+    "① 同事", "② 领导/客户", "③ 对AI",
+};
 
 // ---- 基础块(无 LVGL 样式噪音) ----
 static lv_obj_t *block(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
@@ -200,7 +216,80 @@ static void build_ready(void)
 
     // 工作流切换已取消(固定 build),READY 为简单就绪页
     label(p->root, "就绪", &font_cn_20, UI_INK, 0, CONTENT_Y + 24, W);
+    // v0.2.0: 当前场景小标签(render 按 scene 更新; 让用户知道对谁说话)
+    p->ready_scene = label(p->root, SCENE_NAMES[0], &font_cn_14, UI_SKY_DARK,
+                           0, CONTENT_Y + 62, W);
     hint_label(p->root, "按住音量+:说话  下键:回车  双击音量+:清空");
+}
+
+// v0.2.0: 场景选择页 —— 三行可选(同事 / 领导客户 / 对AI)
+static void build_scene_select(void)
+{
+    page_t *p = &s_pages[APP_ST_SCENE_SELECT];
+    p->root = lv_obj_create(s_bg);
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    label(p->root, "请选择场景", &font_cn_20, UI_INK, 0, CONTENT_Y, W);
+    for (int i = 0; i < APP_SCENE_COUNT; i++) {
+        int y = CONTENT_Y + 52 + i * 44;
+        // 高亮块(render 时按光标切色):行背景
+        p->sc_row_block[i] = block(p->root, 24, y, 192, 36,
+                                   i == 0 ? UI_SKY_DARK : UI_PAPER);
+        // 行文本(颜色随高亮, render 设置)
+        p->sc_row_label[i] = label(p->root, SCENE_NAMES[i], &font_cn_14,
+                                   i == 0 ? 0xFFFFFF : UI_INK, 24, y + 7, 192);
+    }
+    hint_label(p->root, "音量+/-:选择  确认键:确定");
+}
+
+// v0.2.0: 段间等待页 —— 显示第 N 段已录 + 本段预览; 可续录/结束
+static void build_seg_wait(void)
+{
+    page_t *p = &s_pages[APP_ST_SEG_WAIT];
+    p->root = lv_obj_create(s_bg);
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    p->seg_title = label(p->root, "第 1 段已录", &font_cn_20, UI_INK, 0,
+                         CONTENT_Y + 12, W);
+    // 预览正文(可换行): 上留标题, 下留按键区
+    p->seg_text = label(p->root, "", &font_cn_14, UI_MUTED, 16, CONTENT_Y + 56,
+                        W - 32);
+    lv_obj_set_style_text_align(p->seg_text, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(p->seg_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(p->seg_text, 150);
+    p->seg_hint = hint_label(p->root, "音量+:续录  确认键:结束并整理");
+}
+
+// v0.2.0: 合并整理稿确认页 —— 显示整理稿, OK 注入 / UP 放弃
+static void build_merge_review(void)
+{
+    page_t *p = &s_pages[APP_ST_MERGE_REVIEW];
+    p->root = lv_obj_create(s_bg);
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    p->mr_title = label(p->root, "整理稿", &font_cn_20, UI_SKY_DARK, 0,
+                        CONTENT_Y + 8, W);
+    p->mr_text = label(p->root, "", &font_cn_14, UI_INK, 16, CONTENT_Y + 44,
+                       W - 32);
+    lv_obj_set_style_text_align(p->mr_text, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(p->mr_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(p->mr_text, 200);
+    hint_label(p->root, "确认键:发送  音量+:放弃");
 }
 
 static void build_listening(void)
@@ -346,6 +435,9 @@ esp_err_t app_ui_init(void)
     build_transcribing();
     build_running();
     build_approval();
+    build_scene_select();   // v0.2.0
+    build_seg_wait();       // v0.2.0
+    build_merge_review();   // v0.2.0
     for (int i = 0; i < APP_ST_COUNT; i++) {
         lv_obj_add_flag(s_pages[i].root, LV_OBJ_FLAG_HIDDEN);
     }
@@ -394,6 +486,16 @@ void app_ui_render(const app_ui_snapshot_t *snap)
     // ---- 页内容 ----
     show_page(snap->state);
     switch (snap->state) {
+    case APP_ST_READY:
+    case APP_ST_HOME: {
+        // 场景标签(READY 显示; HOME 无此控件时跳过 —— 控件仅 READY 页建)
+        uint8_t sc = snap->scene < APP_SCENE_COUNT ? snap->scene : 0;
+        page_t *rp = &s_pages[APP_ST_READY];
+        if (rp->ready_scene != NULL) {
+            label_set_if_changed(rp->ready_scene, SCENE_NAMES[sc]);
+        }
+        break;
+    }
     case APP_ST_LISTENING:
         // 录音中只显示麦克风图标(静态), 无音量可视化; 仅计时实时刷新
         label_set_fmt_if_changed(s_pages[APP_ST_LISTENING].rec_elapsed, "%ds",
@@ -418,6 +520,36 @@ void app_ui_render(const app_ui_snapshot_t *snap)
         label_set_fmt_if_changed(s_pages[APP_ST_APPROVAL].ap_target, "目标: %s",
                                  snap->approval_target);
         label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_diff, snap->approval_diff);
+        break;
+    }
+    // ---- v0.2.0 三场景 + 分段录入页面渲染 ----
+    case APP_ST_SCENE_SELECT: {
+        for (int i = 0; i < APP_SCENE_COUNT; i++) {
+            bool sel = (i == (int)snap->scene_cursor);
+            page_t *p = &s_pages[APP_ST_SCENE_SELECT];
+            lv_obj_set_style_bg_color(p->sc_row_block[i],
+                                      lv_color_hex(sel ? UI_SKY_DARK : UI_PAPER), 0);
+            lv_obj_set_style_text_color(p->sc_row_label[i],
+                                        lv_color_hex(sel ? 0xFFFFFF : UI_INK), 0);
+        }
+        break;
+    }
+    case APP_ST_SEG_WAIT: {
+        page_t *p = &s_pages[APP_ST_SEG_WAIT];
+        uint8_t idx = snap->seg_index > 0 ? snap->seg_index : 1;
+        label_set_fmt_if_changed(p->seg_title, "第 %d 段已录", (int)idx);
+        label_set_if_changed(p->seg_text, snap->seg_preview);
+        // 已达 3 段: 提示只能结束
+        if (snap->seg_index >= 3) {
+            label_set_if_changed(p->seg_hint, "已达 3 段  确认键:结束并整理");
+        } else {
+            label_set_if_changed(p->seg_hint, "音量+:续录  确认键:结束并整理");
+        }
+        break;
+    }
+    case APP_ST_MERGE_REVIEW: {
+        page_t *p = &s_pages[APP_ST_MERGE_REVIEW];
+        label_set_if_changed(p->mr_text, snap->merge_text);
         break;
     }
     default:

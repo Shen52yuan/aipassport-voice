@@ -43,6 +43,12 @@ typedef struct {
     char           approval_diff[APP_DIFF_MAX];
     uint8_t        approval_risk;
     bool           approval_details;   // ▼ 详情视图开关
+    // ---- v0.2.0 三场景 + 分段录入(2026-09-08) ----
+    uint8_t        scene;              // 当前场景(app_scene_t; READY 顶部标签)
+    uint8_t        scene_cursor;       // 场景选择页高亮光标(0..APP_SCENE_COUNT-1)
+    uint8_t        seg_index;          // 已录段数 0..3(进入 SEG_WAIT 后 ≥1)
+    char           seg_preview[APP_AGENT_MSG_MAX];  // 最近一段定稿预览
+    char           merge_text[APP_AGENT_MSG_MAX];   // 合并整理稿(等确认注入)
 } app_state_t;
 
 void app_state_init(app_state_t *s);

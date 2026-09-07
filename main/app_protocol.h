@@ -34,6 +34,15 @@ size_t app_protocol_agent_action(char *buf, size_t cap, const char *task_id,
 // voice.end 后补发的会话对账帧: {"event":"status","drop":n}(掉帧对账,见 design.md)
 size_t app_protocol_device_status(char *buf, size_t cap, uint32_t drop_count);
 
+// ---- v0.2.0 上行(三场景 + 分段录入,2026-09-08) ----
+// 场景 ↔ 协议字符串("work_wechat"/"report_boss"/"agent_prompt")互转;
+// 未知字符串 → 返回 APP_SCENE_WORK / "work_wechat"(与 relay 默认一致)。
+app_scene_t app_protocol_scene_from_str(const char *s);
+const char *app_protocol_scene_to_str(app_scene_t scene);
+size_t app_protocol_scene_select(char *buf, size_t cap, app_scene_t scene);  // scene.select
+size_t app_protocol_recording_done(char *buf, size_t cap);                   // recording.done
+size_t app_protocol_inject_confirm(char *buf, size_t cap, bool ok);          // inject.confirm
+
 #ifdef __cplusplus
 }
 #endif
