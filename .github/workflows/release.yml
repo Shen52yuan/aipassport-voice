@@ -60,6 +60,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # gh release 需要 git 仓库 + tag 存在(fetch-depth: 0 拉全量含 tags)
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
