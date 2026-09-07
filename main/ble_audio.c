@@ -8,6 +8,7 @@
 #include "ble_audio.h"
 #include <stdbool.h>
 #include <string.h>
+#include "esp_timer.h"
 
 // ==================== 分片打包纯函数(契约见 ble_audio.h) ====================
 
@@ -132,7 +133,12 @@ static const ble_uuid128_t s_audio_svc_uuid = BLE_UUID128_INIT(
 static uint16_t s_ctrl_val_handle;
 static uint16_t s_event_val_handle;
 static uint16_t s_audio_val_handle;
-static char s_ctrl_buf[CTRL_PAYLOAD_MAX + 1];   // 写回调暂存(静态 2KB,零堆)
+// CTRL 下行分帧累积(v0.2.1): Mac 把长 JSON 切成 ≤490B 片顺序写(有响应写保
+// 可靠), 固件累积到行尾 '\n' 再整行 parse。s_ctrl_len/s_ctrl_last_us 只被
+// NimBLE host task 的写回调访问(单线程, 无需锁); 断连/disconnect 时清零。
+static char s_ctrl_buf[CTRL_PAYLOAD_MAX + 1];   // 累积缓冲(整行 ≤2048B)
+static uint16_t s_ctrl_len = 0;                 // 已累积字节
+static int64_t s_ctrl_last_us = 0;              // 最近一片时刻(esp_timer 微秒)
 
 // 连接与订阅状态(host task 写,发送任务读;volatile 足够)
 static volatile uint16_t s_conn = 0xFFFF;          // 当前连接
@@ -234,19 +240,40 @@ static int ctrl_write(uint16_t conn_handle, struct ble_gatt_access_ctxt *ctxt) {
     (void)conn_handle;
     const uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (len == 0 || len > CTRL_PAYLOAD_MAX) {
-        ESP_LOGW(TAG, "CTRL 载荷长度非法 %u(上限 %d)", len, CTRL_PAYLOAD_MAX);
+        ESP_LOGW(TAG, "CTRL 片长度非法 %u(单片上限 %d)", len, CTRL_PAYLOAD_MAX);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;   // 0x0D
     }
-    if (os_mbuf_copydata(ctxt->om, 0, len, s_ctrl_buf) != 0) {
+    // v0.2.1 下行分帧(见 ble_audio.h 契约): Mac 侧分片 ≤490B 写, 本回调累积。
+    // 片间隔超时 → 残留是异常/放弃产物, 作废重来(防陈旧残留污染下行)。
+    int64_t now = esp_timer_get_time();
+    if (s_ctrl_len > 0 && now - s_ctrl_last_us > CTRL_FRAME_TIMEOUT_US) {
+        ESP_LOGW(TAG, "CTRL 下行残留超时清空(%uB 未闭合)", s_ctrl_len);
+        s_ctrl_len = 0;
+    }
+    s_ctrl_last_us = now;
+    if ((uint16_t)s_ctrl_len + len > CTRL_PAYLOAD_MAX) {
+        // 累积超上限 = 单行超 2048B 或残留错位(协议违约)。清空让下一行重来。
+        ESP_LOGW(TAG, "CTRL 下行累积超限, 清空");
+        s_ctrl_len = 0;
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (os_mbuf_copydata(ctxt->om, 0, len, s_ctrl_buf + s_ctrl_len) != 0) {
         return BLE_ATT_ERR_UNLIKELY;
     }
-    s_ctrl_buf[len] = '\0';
+    s_ctrl_len += len;
+    char *nl = memchr(s_ctrl_buf, '\n', s_ctrl_len);
+    if (!nl) {
+        return 0;   // 行未闭合: 等后续片(累积已就位)
+    }
+    const uint16_t line_len = (uint16_t)(nl - s_ctrl_buf);
+    s_ctrl_buf[line_len] = '\0';
+    s_ctrl_len = 0;   // 单行分帧: 行尾 '\n' 后多余字节(多行残留)随本行一并丢弃
     app_event_t ev;
-    if (app_protocol_parse(s_ctrl_buf, len, &ev)) {
+    if (app_protocol_parse(s_ctrl_buf, line_len, &ev)) {
         app_protocol_dispatch_event(&ev);   // 审批重要投递,其余零阻塞
         return 0;
     }
-    ESP_LOGW(TAG, "CTRL 行拒绝: %.*s", (int)(len > 80 ? 80 : len), s_ctrl_buf);
+    ESP_LOGW(TAG, "CTRL 行拒绝: %.*s", (int)(line_len > 80 ? 80 : line_len), s_ctrl_buf);
     return BLE_ATT_ERR_WRITE_NOT_PERMITTED;   // 0x03:畸形/未知 type
 }
 
@@ -354,6 +381,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
             s_conn = 0xFFFF;
             s_audio_conn = 0xFFFF;
             s_event_subscribed = false;
+            s_ctrl_len = 0;   // 下行分帧残留随断开清空(半截行作废)
             app_event_t d = { .type = APP_EV_BLE_DISCONNECTED };
             // 收束关键事件:important 投递,队列满时不丢(性能轮队列 16→8 后
             // 更关键;与 mode.c 断连投递语义对齐)。调用在 NimBLE host 任务

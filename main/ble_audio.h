@@ -5,8 +5,12 @@
 //
 // 承载契约(GATT 由 ble_audio.c 注册):
 //   Service 0xA2B0 (0000A2B0-0000-1000-8000-00805F9B34FB)
-//     ├─ 0xA2B1 CTRL  WRITE|WRITE_ENC    Mac→设备:JSON 行 ≤2048B(APP_PROTO_RX_CAP;长写由 NimBLE
-//     │                                   重组,设备端写回调只做 app_protocol_parse→投事件,零阻塞)
+//     ├─ 0xA2B1 CTRL  WRITE|WRITE_ENC    Mac→设备:整行 JSON ≤2048B(APP_PROTO_RX_CAP)。
+//     │                                   下行分帧: macOS CoreBluetooth 不发起 Prepare
+//     │                                   Write(超 maximumWriteValueLength 报 0x0D) →
+//     │                                   Mac 按 ≤490B 片写入(有响应写保可靠), 末片带
+//     │                                   行尾 '\n'; 固件累积到 '\n' 再整行 parse(零阻塞)。
+//     │                                   帧间隔超时(2s)自动清残留, 断连即清。
 //     ├─ 0xA2B2 EVENT NOTIFY             设备→Mac:JSON 行 ≤512B(app_protocol_* 序列化;
 //     │                                   单行跨包 → 应用层分片,末片带行分隔 '\n')
 //     └─ 0xA2B3 AUDIO NOTIFY             设备→Mac:一帧 = 100ms 音频。BLE 上是 804B
@@ -39,7 +43,8 @@ extern "C" {
 #define CTRL_CHR_UUID      0xA2B1
 #define EVENT_CHR_UUID     0xA2B2
 #define AUDIO_CHR_UUID     0xA2B3
-#define CTRL_PAYLOAD_MAX   2048   // CTRL 写载荷上限(= APP_PROTO_RX_CAP;超长拒写)
+#define CTRL_PAYLOAD_MAX   2048   // CTRL 单次写/整行上限(= APP_PROTO_RX_CAP;超长拒写)
+#define CTRL_FRAME_TIMEOUT_US (2 * 1000 * 1000)   // 下行分帧: 相邻片间隔超时 → 残留作废
 
 // ---- 错误码 ----
 typedef enum {
