@@ -1,0 +1,79 @@
+name: Build & release firmware
+
+# 打 tag 即自动编译，例如：git tag v0.0.1 && git push --tags
+# 编译在 GitHub 官方 runner 上跑（容器 espressif/idf:v5.5.3），本机零安装。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ESP32-C3 firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: espressif/idf:v5.5.3
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore managed components
+        uses: actions/cache@v4
+        with:
+          path: managed_components
+          # 注意：dependencies.lock 在本仓库被 .gitignore 忽略，不能作为 key，
+          # 否则每次都 miss。改用 main/idf_component.yml 的内容哈希。
+          key: managed-components-idf-5.5.3-${{ hashFiles('main/idf_component.yml') }}
+
+      - name: Build
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf.py set-target esp32c3
+          idf.py build
+
+      # build-apps.yml 也会在同一 tag 上创建 Release（并发会撞车），
+      # 所以这里做幂等处理：Release 已存在就改为追加文件。
+
+      - name: Package flashable images
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          sh scripts/package-firmware.sh build dist "${GITHUB_REF_NAME:-dev}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.ref_name || github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-${{ github.ref_name }}
+          path: dist
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME 已存在（build-apps.yml 可能已创建），改为追加固件文件"
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+          fi
