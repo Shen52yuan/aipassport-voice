@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""BLE 直连中转程序: 收设备音频 → 火山 ASR 流式转写 → 注入当前输入框。
+"""aipassport 改造版: 收设备音频 → 本地 whisper.cpp 转写 → DeepSeek 整理 → 注入当前输入框。
+
+（原 folo-ai-passport-voice 是「火山云 ASR」；本改造把 ASR 换成 Mac 本地
+whisper.cpp，并在定稿注入前插一层 DeepSeek V4-Flash 整理，零云端 ASR 费用、
+音频不出本机。接口改造集中在 asr_local_whisper.py / refine_deepseek.py，本文件
+仅替换 ASR 导入并在 _results_loop 定稿分支插入 refine 调用。）
+
 
 设备(ESP32-C3, 纯 BLE 外设, 广播名 "AI Passport"):
   Service 0xA2B0 (0000A2B0-0000-1000-8000-00805F9B34FB)
@@ -57,6 +63,10 @@ from adpcm import (  # noqa: E402  (同目录模块;BLE 压缩块重组/解码�
     ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, decode_block,
 )
 
+# aipassport 改造：用本地 whisper.cpp 替代火山 ASR，并在定稿前插 DeepSeek 整理
+from asr_local_whisper import LocalWhisperASR as StreamingASR  # 同接口别名
+from refine_deepseek import refine  # noqa: E402
+
 SERVICE_UUID = "0000A2B0-0000-1000-8000-00805F9B34FB"
 CTRL_UUID = "0000A2B1-0000-1000-8000-00805F9B34FB"
 EVENT_UUID = "0000A2B2-0000-1000-8000-00805F9B34FB"
@@ -67,6 +77,11 @@ AUDIO_FRAME_SEC = 0.1
 AUDIO_Q_MAX = 20    # 音频帧(3200B)上限 ≈2s 抖动;更长积压无益,宁可丢帧(PERF P3-2)
 EVENT_Q_MAX = 64    # 控制事件上限(正常秒级几条;兜底防失控)
 CTRL_LINE_MAX = 2048        # 对齐固件 APP_PROTO_RX_CAP
+# 下行单片上限:macOS maximumWriteValueLength ≈ MTU-3(517MTU 时 ~509B)。
+# 取 490 留安全余量;长行由 _send_ctrl 切 ≤490B 片(有响应写) + 固件按
+# '\n' 累积重组。绝不能超实际上限 —— CoreBluetooth 超限报 0x0D 且不
+# 自动 Prepare Write(真机取证 2026-09-08)。
+DOWNLINK_CHUNK_MAX = 490
 SCAN_TIMEOUT = 15
 # 每小时自动校时:校时源仅电脑客户端(无 SNTP)。连接建立后立即同步一次,
 # 此后每 TIME_SYNC_INTERVAL_S 秒一次;断链/退出时 _stop 收束任务。
@@ -348,12 +363,16 @@ class BleakTransport:
                                    disconnected_callback=on_disconnect)
         await self._client.connect()
         # macOS: MTU 由 CoreBluetooth 与设备协商(设备 ATT_PREFERRED_MTU=517),
-        # 无需也不支持中央侧指定; 长载荷 write_gatt_char 自动按 MTU 分包。
+        # 无需也不支持中央侧指定。单次写上限 = maximumWriteValueLength ≈ MTU-3;
+        # 长载荷必须上层切片(见 _send_ctrl/DOWNLINK_CHUNK_MAX), 本层不做分包。
 
-    async def write_gatt_char(self, uuid, data):
-        # response=False: 无响应写,免等 ATT 确认 RTT(~5-20ms),转写预览/审批更快落屏。
-        # 固件 CTRL 特征已加 WRITE_NO_RSP(回调零改动);下行失败本就不重试,语义不变。
-        await self._client.write_gatt_char(uuid, data, response=False)
+    async def write_gatt_char(self, uuid, data, response=False):
+        # response 由上层按需指定: 普通下行(短行, 已 ≤490B)无响应写免 RTT;
+        # 长行分片片用有响应写(每片确认后才发下一片, 固件累积到 '\n' 重组,
+        # 不会丢片/乱序)。注意: 单次写绝不能超 maximumWriteValueLength
+        # (≈MTU-3, ~509B) —— CoreBluetooth 超限报 0x0D 且不自动 Prepare Write,
+        # 长载荷必须先由 _send_ctrl 切片(真机取证 2026-09-08)。
+        await self._client.write_gatt_char(uuid, data, response=response)
 
     async def start_notify(self, uuid, handler):
         # bleak 3.x 回调签名 (characteristic, data)
@@ -374,7 +393,7 @@ class Relay:
                  key_action_fn=None, on_phase=None, on_candidate=None,
                  timeout=60.0, do_inject=True, do_approval=True, dry_run=False,
                  connect_timeout_s=5.0, stdin_input=None):
-        from asr_client import StreamingASR
+        # aipassport: StreamingASR 已在模块顶部指向本地 whisper（见 asr_local_whisper）
         from inject import paste_text, key_action
         # GUI 前端(FRE 向导)状态钩子: on_phase(phase) 在 relay 线程调用,
         # phase ∈ scanning/connecting/connected/disconnected/
@@ -414,6 +433,19 @@ class Relay:
         self.session_stats = []     # 每个 voice 会话的掉帧统计(AC3 对账)
         self._ble_chunk_lens = {}   # BLE chunk 长度分布(取证: CoreBluetooth 合并检测)
         self.decisions = []         # 收到的 agent.action 列表
+        # -- 三场景 + 分段录入 (v0.2.0, 协议见 多段三场景协议设计.md) --
+        # 当前场景(preset), 由设备 scene.select 上行切换; 运行态覆盖
+        # cfg.refine_preset, 不改 config 文件。
+        self._scene = "work_wechat"
+        # 分段 buffer: 一次"结束录入"前收集的 1..3 段转写定稿文本
+        self._seg_buffer = []       # 每元素为一段的 final_text
+        # v0.2.4 连续快录(voice_input): 每句定稿即后台梳理, 稿子累积于此,
+        # 用户按 OK(recording.done)后合并下行确认 —— 录制全程不等转写。
+        self._vi_drafts = []        # 每元素 (录音序号, 已梳理稿): 定稿完成
+                                    # 序 ≠ 录音序, 汇总时按序号排序防乱序
+        self._vi_seq = 0            # 录音序号(voice.start 时递增)
+        self._merge_mode = False    # True = 已结束录入、等确认注入(忽略新段)
+        self._merge_text = ""       # 最近一次合并整理稿(等确认注入/放弃)
 
     # -- 主流程 --
 
@@ -461,6 +493,18 @@ class Relay:
             except Exception:
                 pass
             raise RelayError(f"连接/订阅失败: {e}") from e
+        # [aipassport] 预热本地 whisper: 首次加载 1.5GB 模型需数秒, 提前加载
+        # 避免首轮 PTT 期间模型加载把音频帧挤丢(实测「音频队列满,丢弃 N 帧」,
+        # 加载完成时语音已结束 → 无转写)。模型在 asr_local_whisper._get_model
+        # 有全局缓存, 预热一次后各会话即开即用。
+        try:
+            print("[relay] 预热本地 ASR(首次加载模型需数秒)...")
+            _warm = self._asr_factory()
+            await _warm.connect()
+            await _warm.close()
+            print("[relay] ASR 预热完成")
+        except Exception as _e:
+            print(f"[relay] ASR 预热失败(将按需加载): {_e}", file=sys.stderr)
         print("[relay] 等待语音(PTT 按住说话; Ctrl+C 退出)")
         # 校时:连接建立后立即同步一次,此后每小时一次(_time_loop 内部周期)
         self._time_task = asyncio.create_task(self._time_loop())
@@ -693,6 +737,22 @@ class Relay:
             await self._on_voice_start(ev)
         elif etype == "voice.end":
             await self._on_voice_end()
+        elif etype == "scene.select":
+            # v0.2.0/v0.2.3: 设备端用户确认场景 → 切换整理 preset + 下行确认
+            scene = str(ev.get("scene") or "").strip()
+            if scene in ("work_wechat", "report_boss", "agent_prompt",
+                         "voice_input"):
+                self._scene = scene
+                print(f"[scene] 切换场景 → {scene}")
+                await self._send_ctrl({"type": "scene.set", "scene": scene})
+            else:
+                print(f"[scene] 未知场景 {scene!r}, 忽略", file=sys.stderr)
+        elif etype == "recording.done":
+            # v0.2.0: 用户按 OK 结束分段录入 → 合并多段 → 综合整理 → 下行
+            await self._on_recording_done()
+        elif etype == "inject.confirm":
+            # v0.2.0: 整理稿预览页按 OK(ok:true 注入) / 放弃(ok:false)
+            await self._on_inject_confirm(bool(ev.get("ok", False)))
         elif etype == "status":
             # voice.end 后设备补发的会话对账帧: 挂到上一个完成的会话
             self._device_drop = ev.get("drop")
@@ -726,6 +786,16 @@ class Relay:
         return task
 
     async def _on_voice_start(self, ev):
+        # v0.2.0 防死锁: 正常流程里 MERGE_REVIEW(等确认注入)期间设备不会
+        # 发起新语音(该态按键无 PTT 语义)。能收到 voice.start = 设备已脱离
+        # 确认态(如 AGENT_RUNNING 超时回 READY 后用户重新说话 / 设备重启)
+        # → 上次整理稿作废, 复位 merge 状态, 否则后续定稿被 _merge_mode 丢弃。
+        if self._merge_mode:
+            print("[seg] 设备重新说话, 复位上次未确认的整理稿(视为放弃)",
+                  file=sys.stderr)
+            self._merge_mode = False
+            self._merge_text = ""
+            self._vi_drafts = []   # v0.2.4: 未走"结束录入"即重说话 → 句稿作废
         if self._session is not None:
             print("[voice] 收到重复 voice.start, 先结束上一个会话",
                   file=sys.stderr)
@@ -747,6 +817,10 @@ class Relay:
         if self._on_phase:
             self._on_phase("session_start")
         self._session = _VoiceSession(self, asr, afmt)
+        # v0.2.4 连续快录: 绑录音序号(定稿完成序≠录音序, 排序用)。所有场景
+        # 都递增无妨(仅 voice_input 使用); 新会话 = 新一句。
+        self._vi_seq += 1
+        self._session.vi_seq = self._vi_seq
         await self._session.begin()        # 立即返回(ASR 连接后台化)
 
     async def _on_key_action(self, action):
@@ -762,6 +836,11 @@ class Relay:
         # key.action=clear -> sent, 这里有 [key] clear, 两行一对齐就知道
         # 丢在哪一段——设备没判出手势 / 事件没上行 / 注入失败。
         print(f"[key] {action}")
+        if not self.do_inject:
+            # [aipassport] --no-inject/dry-run 下按键宏同样禁用, 只打印不操作
+            # 前台(避免误清输入框/误回车, 2026-09-07 实机踩到)。
+            print(f"[key] 注入已禁用(--no-inject/dry-run), 跳过 {action}")
+            return
         try:
             # 审查 P1-3: key 注入是阻塞同步调用(Windows SendInput 逐键
             # 序列化, 实测每键可达 ~2s), 直接跑在事件循环里会冻结
@@ -794,9 +873,11 @@ class Relay:
         # 会话统计先占位(session_stats 立即出现),status 帧挂到它——
         # 收尾完成时只补 final_text 并打印(见 _VoiceSession.end)。
         self._start_closing(s)         # 后台收尾 + 进收尾槽(不阻塞)
-        # 审批演示放后台任务: 不阻塞 drain, status/agent.action 等后续事件
-        # 照常处理(否则 status 对账帧会被压在队列里等按键)
-        if self.do_approval and self._approval_task is None:
+        # 审批演示(GUI 悬浮窗直通路径保留; v0.2.0 CLI 分段模式跳过 ——
+        # 录入收尾改由设备 recording.done + inject.confirm 驱动, 旧 agent
+        # 审批演示与之冲突)。放后台任务: 不阻塞 drain(同下注释)。
+        if (self.do_approval and self._approval_task is None and
+                self._on_candidate is not None):
             self._approval_task = asyncio.create_task(self._demo_approval())
 
     # -- 注入 --
@@ -844,6 +925,178 @@ class Relay:
         except Exception as e:
             print(f"[tx] agent.status done 下行失败: {e}", file=sys.stderr)
 
+    # -- v0.2.0 三场景 + 分段录入(协议见 多段三场景协议设计.md) --
+
+    def _scene_cfg(self, cfg):
+        """返回带当前场景 preset 的 cfg 副本(不改原 dict)。"""
+        c = dict(cfg)
+        c["refine_preset"] = self._scene
+        return c
+
+    async def _on_segment_final(self, text, cfg, seq=0):
+        """单段定稿: 存段 buffer + 下行 segment.ready(设备显示段预览)。
+
+        不在此处 refine/注入 —— 综合整理等 recording.done(用户按 OK
+        结束录入)后对全部段做一次(多段合并去重、一次成稿)。
+        v0.2.3/0.2.4: voice_input(语音输入)场景每句定稿即后台梳理,
+        稿子按录音序号累积(_vi_drafts), 录制不阻塞 —— 全部录完按 OK
+        (recording.done)把句稿按录音序合并下行 merge.result, 设备弹
+        整理稿确认。seq=录音序号(voice.start 时绑, 定稿完成序≠录音序)。
+        若已在"等确认注入"(merge 完成用户还没按键)收到新段, 丢弃并提示。
+        """
+        if self._merge_mode:
+            print("[seg] 正在等确认注入, 忽略新语音段", file=sys.stderr)
+            return
+        self._seg_buffer.append(text)
+        idx = len(self._seg_buffer)
+        if idx > 3:
+            print(f"[seg] 段数超上限(>{3}), 截断", file=sys.stderr)
+            self._seg_buffer = self._seg_buffer[:3]
+            idx = 3
+        print(f"[seg] 第 {idx} 段已录({len(text)} 字): {text[:60]!r}")
+        # v0.2.3/0.2.4 语音输入场景: 每句定稿即后台梳理累积(_vi_drafts),
+        # 不显示段预览/不进段间等待 —— 录制不阻塞, 全部录完按 OK 一次汇总。
+        if self._scene == "voice_input":
+            _draft = text
+            try:
+                _cfg2 = self._scene_cfg(cfg)   # preset=voice_input
+                if cfg.get("refine_enabled", True):
+                    _draft = await asyncio.to_thread(refine, text, _cfg2)
+            except Exception as e:
+                print(f"[refine] voice_input 句梳理失败回退原文: {e}",
+                      file=sys.stderr)
+            if _draft:
+                self._vi_drafts.append((seq, _draft))
+            else:
+                self._vi_drafts.append((seq, text))   # 兜底: 空稿不丢句
+            print(f"[seg] voice_input 第 {len(self._vi_drafts)} 句已后台梳理"
+                  f"(录制不等待); 按 OK 汇总")
+            return
+        line = {"type": "segment.ready", "index": idx, "total": 3,
+                "text": text}
+        try:
+            await self._send_ctrl(line)
+        except Exception as e:
+            print(f"[tx] segment.ready 下行失败: {e}", file=sys.stderr)
+
+    async def _refine_and_inject(self, text, cfg, session, t0):
+        """GUI 悬浮窗直通: 整理(按当前场景) → 注入 + timing(原单段逻辑)。
+        session: 所属 _VoiceSession(填 final_text/统计用)。"""
+        _t0 = t0
+        refined = text
+        try:
+            if cfg.get("refine_enabled", True):
+                refined = await asyncio.to_thread(
+                    refine, text, self._scene_cfg(cfg))
+                if not refined:
+                    refined = text
+        except Exception as e:
+            print(f"[refine] DeepSeek 整理失败, 回退原文注入: {e}",
+                  file=sys.stderr)
+        _t1 = time.monotonic()
+        if session is not None:
+            session.final_text = refined
+        if self._on_candidate is not None:
+            try:
+                self._on_candidate(refined, True)
+            except Exception as e:
+                print(f"[voice] on_candidate 回调异常: {e}", file=sys.stderr)
+        await asyncio.to_thread(self._inject, refined)
+        _t2 = time.monotonic()
+        _base = getattr(session, "end_mono", None) or _t0
+        print(
+            f"[timing] 松手→转写完成 {_t0 - _base:.1f}s | "
+            f"整理(DeepSeek) {_t1 - _t0:.1f}s | "
+            f"注入 {_t2 - _t1:.1f}s | "
+            f"合计(松手→注入) {_t2 - _base:.1f}s", file=sys.stderr)
+
+    async def _on_recording_done(self):
+        """用户按 OK 结束录入: 合并 buffer 全部段 → DeepSeek 综合整理
+        (按当前场景 preset) → 下行 merge.result(设备屏显示整理稿, 等确认)。
+        buffer 空(误触)则忽略。整理失败回退: 各段以换行简单拼接。"""
+        if self._merge_mode:
+            print("[seg] 已在等确认注入, recording.done 忽略", file=sys.stderr)
+            return
+        # v0.2.4 语音输入连续快录: 各句定稿时已梳理(_vi_drafts), 这里只把
+        # 句稿拼成一篇下行, 不再二次改写(句间空行分段)。
+        if self._scene == "voice_input":
+            if not self._vi_drafts:
+                print("[seg] voice_input 结束录入但无已梳理句稿, 忽略",
+                      file=sys.stderr)
+                return
+            self._merge_mode = True
+            # 按录音序号排序(定稿完成序≠录音序, 长句慢可能后定稿)
+            self._vi_drafts.sort(key=lambda x: x[0])
+            result = "\n\n".join(d for _, d in self._vi_drafts)
+            self._vi_drafts = []
+            self._merge_text = result
+            print(f"[seg] voice_input 汇总: {len(result)} 字 "
+                  f"({result.count(chr(10)*2)+1} 句), 下行等待确认: "
+                  f"{result[:60]!r}")
+            try:
+                await self._send_ctrl({"type": "merge.result", "text": result})
+            except Exception as e:
+                print(f"[tx] merge.result 下行失败: {e}", file=sys.stderr)
+            return
+        if not self._seg_buffer:
+            print("[seg] recording.done 但无已录段, 忽略", file=sys.stderr)
+            return
+        self._merge_mode = True
+        cfg = None
+        # 取最近一次会话的 cfg(含 voice_min_sec 等); 无则 load_config
+        try:
+            from asr_local_whisper import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+        if self._session is not None:
+            try:
+                cfg = self._session.asr.cfg
+            except Exception:
+                pass
+        segs = self._seg_buffer
+        self._seg_buffer = []        # 清 buffer: 确认后再录即开新会话
+        # 多段拼接: 带段标记, refine._build_messages 识别后做"综合"整理
+        if len(segs) == 1:
+            merged_raw = segs[0]
+        else:
+            merged_raw = "\n".join(
+                f"◆第{i}段◆{t}" for i, t in enumerate(segs, 1))
+        print(f"[seg] 结束录入: 共 {len(segs)} 段, 合并 {len(merged_raw)} 字, "
+              f"综合整理中(scene={self._scene})...")
+        result = merged_raw
+        try:
+            if cfg.get("refine_enabled", True):
+                result = await asyncio.to_thread(
+                    refine, merged_raw, self._scene_cfg(cfg))
+                if not result:
+                    result = merged_raw
+        except Exception as e:
+            print(f"[refine] 综合整理失败, 回退原文: {e}", file=sys.stderr)
+        self._merge_text = result
+        print(f"[seg] 整理完成({len(result)} 字), 下行等待确认: "
+              f"{result[:80]!r}")
+        line = {"type": "merge.result", "text": result}
+        try:
+            await self._send_ctrl(line)
+        except Exception as e:
+            print(f"[tx] merge.result 下行失败: {e}", file=sys.stderr)
+
+    async def _on_inject_confirm(self, ok):
+        """整理稿预览页按键: ok=true → 注入整理稿; false → 丢弃。
+        无论结果都下行 agent.status done 让设备回 READY(会话完整收尾)。"""
+        self._merge_mode = False
+        result = getattr(self, "_merge_text", "")
+        if ok and result:
+            print(f"[seg] 用户确认, 注入 {len(result)} 字符")
+            await asyncio.to_thread(self._inject, result)
+        elif ok:
+            print("[seg] 确认注入但无整理稿, 跳过", file=sys.stderr)
+        else:
+            print("[seg] 用户放弃本次整理稿")
+        self._merge_text = ""
+        await self._send_agent_done()
+
     # -- 审批演示 --
 
     async def _demo_approval(self):
@@ -854,9 +1107,9 @@ class Relay:
             req = {
                 "type": "agent.approval_request",
                 "taskId": "task-001",
-                "title": "Deploy to production",
+                "title": "部署到生产环境",
                 "target": "api.example.com",
-                "diffSummary": "+12 -3 in deploy.sh",
+                "diffSummary": "deploy.sh 中 +12 -3",
                 "riskLevel": "high",
             }
             await self._send_ctrl(req)
@@ -880,11 +1133,24 @@ class Relay:
             self._approval_task = None
 
     async def _send_ctrl(self, obj):
-        payload = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        if len(payload) > CTRL_LINE_MAX:
+        payload = json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n"
+        if len(payload) > CTRL_LINE_MAX + 1:
             raise RelayError(f"CTRL 载荷超 {CTRL_LINE_MAX}B, 未发送")
+        # 下行分帧(v0.2.1): macOS 单次写上限 ≈ maximumWriteValueLength(MTU-3,
+        # ~509B), 超限报 0x0D 且不自动长写。> 490B 的行切成 ≤490B 片, 每片
+        # 有响应写(可靠)顺序发, 行尾 '\n' 由最后一片携带 —— 固件按 '\n'
+        # 累积重组(ble_audio.c ctrl_write)。短行单次无响应写免 RTT。
         try:
-            await self._transport.write_gatt_char(CTRL_UUID, payload)
+            if len(payload) <= DOWNLINK_CHUNK_MAX:
+                await self._transport.write_gatt_char(CTRL_UUID, payload)
+            else:
+                pieces = [payload[i:i + DOWNLINK_CHUNK_MAX]
+                          for i in range(0, len(payload), DOWNLINK_CHUNK_MAX)]
+                for p in pieces:
+                    await self._transport.write_gatt_char(CTRL_UUID, p,
+                                                          response=True)
+                print(f"[tx] 长行分片: {len(payload)}B → {len(pieces)} 片"
+                      f"(片 ≤{DOWNLINK_CHUNK_MAX}B)", file=sys.stderr)
         except Exception as e:
             raise RelayError(f"CTRL 写入失败: {e}") from e
 
@@ -971,6 +1237,10 @@ class _VoiceSession:
         self._ended = False                 # end() 幂等
         self._done_sent = False             # agent.status done 只发一次
         self._stats_ref = None              # 本会话的统计占位(收尾完成时补全)
+        # v0.2.0 分段模式: 会话定稿只入段 buffer, 不发 agent.status done
+        # (设备由 segment.ready 引导进 SEG_WAIT 而非回 READY)。GUI 悬浮窗
+        # 直通路径(relay._on_candidate 挂接)仍为 False —— 单段即收尾。
+        self.seg_mode = relay._on_candidate is None
 
     async def begin(self):
         # 连接与结果循环后台化:握手(网络)数百 ms 内事件队列照常消费
@@ -1009,8 +1279,17 @@ class _VoiceSession:
         直接 _close_up() 收尾, 一个 done 都不发 —— 设备停在 TRANSCRIBING 直到
         自己的 STT 超时(用户视角就是"说完卡住"), 中途还接不了新会话。
         失败只记日志(见 _send_agent_done), 不重试: 会话已经在收尾了。
+
+        v0.2.0 分段模式(seg_mode): 正常定稿(文本已入段 buffer)后抑制 done
+        —— 设备由下行 segment.ready 引导进 SEG_WAIT 等用户续录/结束, done
+        会把它错误拉回 READY。仅在异常收尾(无定稿文本)时发 done, 让设备
+        离开 TRANSCRIBING 不卡死。
         """
         if self._done_sent:
+            return
+        if self.seg_mode and self.final_text:
+            # 正常定稿 + 分段模式: 抑制 done(等 recording.done 后再走收尾)
+            self._done_sent = True
             return
         self._done_sent = True
         await self.relay._send_agent_done()
@@ -1036,13 +1315,41 @@ class _VoiceSession:
                         await self.relay._downlink_transcript(text, is_final)
                 if is_final:
                     if text:
-                        self.final_text = text
-                        await asyncio.to_thread(self.relay._inject, text)
+                        # 注入前兜底(双保险): 极短会话(误触/环境音)即使 whisper
+                        # 幻觉出整句也不注入。end() 门槛拦截主路径, 这里防
+                        # 竞态/版本漏检——frames 太少=没真说话, 内容不可信。
+                        _min_f = int(self.asr.cfg.get("voice_min_sec", 1.5) * 10)
+                        if self.rx_frames < _min_f:
+                            print(f"[voice] 定稿丢弃: 会话仅 {self.rx_frames} 帧"
+                                  f"(<{_min_f / 10.0:.1f}s), 视为误触幻觉不注入",
+                                  file=sys.stderr)
+                        else:
+                            _t0 = time.monotonic()   # [timing] 定稿文本就绪时刻
+                            self.final_text = text
+                            # GUI 悬浮窗模式(on_candidate): 沿用原有直通——
+                            # 悬浮窗即时显示整理稿, 用户自己看窗口决定发送,
+                            # 不走设备分段确认(兼容既有 GUI 前端)。
+                            if self.relay._on_candidate is not None:
+                                await self.relay._refine_and_inject(
+                                    text, self.asr.cfg, self, _t0)
+                            else:
+                                # CLI/真机分段模式(v0.2.0):
+                                # 定稿 → 存段 + 下行 segment.ready(设备显示
+                                # 段预览, 等用户 UP 续录 / OK 结束录入)。
+                                # 注意: 不在此处 refine/注入 —— 综合整理等
+                                # 结束录入(recording.done)后对全部段做一次。
+                                await self.relay._on_segment_final(
+                                    text, self.asr.cfg,
+                                    seq=getattr(self, "vi_seq", 0))
                     # 会话收尾信号:设备状态机(TRANSCRIBING/AGENT_RUNNING)
                     # 靠 agent.status done 下行才回 DONE——悬浮窗取代的是
                     # 预览,不是收尾信号(真机验证 2026-08-27: 缺此下行设备
                     # 一直 TRANSCRIBING 直到 STT 超时)。
-                    await self._ensure_agent_done()
+                    # v0.2.0 分段模式: done 不下发 —— 设备由 relay 下行的
+                    # segment.ready 引导进 SEG_WAIT(等用户续录/结束)。仅
+                    # 悬浮窗直通/GUI 路径保持 done(原行为: 会话即结束)。
+                    if self.relay._on_candidate is not None:
+                        await self._ensure_agent_done()
                     self._final_received.set()
                     return
         except Exception as e:
@@ -1098,6 +1405,20 @@ class _VoiceSession:
             return
         self._ended = True
         self.end_mono = time.monotonic()   # voice.end 时刻(理论帧数基准)
+        # 最小语音门槛(2026-09-07 实测): 环境音/误触会产生 0.1~1s 极短会话
+        # (如收音到附近 AI 语音尾音), whisper 却能对噪声幻觉出整句, 还会注入。
+        # 帧数 < voice_min_sec*10(100ms/帧) 视为无有效语音 → 快速收尾不转写不注入。
+        min_frames = int(self.asr.cfg.get("voice_min_sec", 1.5) * 10)
+        if self.rx_frames < min_frames:
+            print(f"[voice] 语音过短({self.rx_frames} 帧, <{min_frames / 10.0:.1f}s), "
+                  f"视为环境音/误触, 忽略本次会话", file=sys.stderr)
+            # 门槛拦截必须先补占位统计(否则 _close_up 里 _stats_ref=None 崩)
+            stats = self._stats()
+            stats["done"] = True
+            self._stats_ref = stats
+            self.relay.session_stats.append(stats)
+            await self._close_up()
+            return
         # 占位立即入列:status 帧挂到 session_stats[-1] 不依赖收尾完成。
         # 保存本会话的引用:收尾完成时经 _stats_ref 补全——并发收尾时
         # session_stats[-1] 可能是其他会话的占位(重复 start/后台化后常见)。
@@ -1275,7 +1596,7 @@ def main():
                     help="等价 --no-inject, 且注入动作只打印将执行的命令")
     args = ap.parse_args()
 
-    from asr_client import load_config
+    from asr_local_whisper import load_config
     cfg = load_config()
     relay = Relay(
         transport=_build_transport(cfg),

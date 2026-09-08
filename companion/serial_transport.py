@@ -148,8 +148,9 @@ class SerialTransport:
                 "设备未处于 USB 模式或固件未运行 usb_link")
         print("[usb] 握手完成(设备在线)")
 
-    async def write_gatt_char(self, uuid, data):
-        """CTRL 整帧写(uuid 忽略;USB 无 MTU 分片,4096 ring 容整帧)。"""
+    async def write_gatt_char(self, uuid, data, response=False):
+        """CTRL 整帧写(uuid 忽略;USB 无 MTU 分片,4096 ring 容整帧;
+        response 参数仅 BLE 分片用,USB 忽略)。"""
         if self._ser is None or not self._ser.is_open:
             raise SerialError("设备未连接,下行丢弃")
         await self._write_frame(FRAME_CTRL, bytes(data))

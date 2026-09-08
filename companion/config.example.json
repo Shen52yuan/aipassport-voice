@@ -1,11 +1,19 @@
 {
-  "volcano_api_key": "PASTE_YOUR_VOLCANO_API_KEY_HERE",
-  "volcano_ws_url": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
-  "volcano_resource_id": "volc.bigasr.sauc.duration",
-  "volcano_model": "bigmodel_async",
-  "volcano_enable_nonstream": true,
   "channel": "ble",
   "usb_port": "",
   "inject_focus_delay": 2.0,
-  "inject_mode": "auto"
+  "inject_mode": "auto",
+
+  "whisper_model_path": "~/models/ggml-large-v3-turbo.bin",
+  "whisper_threads": 8,
+  "whisper_language": "zh",
+  "whisper_partial_interval": 1.0,
+  "whisper_min_partial_sec": 1.0,
+
+  "refine_enabled": true,
+  "refine_preset": "work_wechat",
+  "deepseek_api_key": "PASTE_YOUR_DEEPSEEK_API_KEY_HERE",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "deepseek_model": "deepseek-v4-flash",
+  "deepseek_temperature": 0.3
 }

@@ -1,9 +1,9 @@
-# AI Passport Companion 依赖(与开发机 .venv 实测版本锁定)
-# 安装: python3 -m venv companion/.venv && companion/.venv/bin/pip install -r companion/requirements.txt
-# Windows 平台标记(PEP 508): Win10 1803+ / Win11 均满足 bleak winrt 后端要求。
+# AI Passport Companion 依赖（aipassport 改造版：本地 whisper + DeepSeek 整理）
+# 安装: 用已装好 whisper-cpp-python 的 venv 直接跑即可，无需重建 .venv
+#   (本机 venv: /Users/Zhuanz/.workbuddy/binaries/python/envs/default/bin/python)
 bleak==3.0.2; platform_system == "Darwin"      # macOS 11+ 单后端 BLE 客户端
 bleak[winrt]==3.0.2; platform_system == "Windows"   # Windows BLE(winrt 后端)
-websockets==17.0.1    # 火山 ASR 双向流式上行
+# websockets==17.0.1  # 火山 ASR 用，aipassport 改造版已改为本地 whisper，可不要
 pywin32>=306; platform_system == "Windows"     # Windows 注入(unicode SendInput / 剪贴板)
 # macOS unicode 注入(CGEvent 逐字符键盘事件, 不碰剪贴板); 缺失时 auto 模式
 # 回退剪贴板路径(见 inject.py paste_text mode 说明)
@@ -19,3 +19,10 @@ pystray>=0.19
 ttkbootstrap>=1.10
 # Pillow: pystray 托盘图标运行时绘制(PIL.Image)
 Pillow>=10.0
+
+# ---- aipassport 新增依赖 ----
+# 本地 whisper.cpp 引擎（已通过 install_whisper_local.sh 装进 venv；
+# 若需重装：pip install whisper-cpp-python）。会顺带拉 numpy/librosa。
+whisper-cpp-python>=0.2.0
+# DeepSeek 整理层 HTTP 调用（OpenAI 兼容接口）；requests 已在 venv 中。
+requests>=2.31
