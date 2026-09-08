@@ -56,6 +56,7 @@ typedef struct {
     lv_obj_t *mr_title;                   // MERGE_REVIEW:整理稿标题
     lv_obj_t *mr_text;                    // MERGE_REVIEW:整理稿全文
     lv_obj_t *ready_scene;                // READY:当前场景小标签(顶栏下)
+    lv_obj_t *ready_hint;                 // READY:底部提示行(场景化文本)
 } page_t;
 
 static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
@@ -219,7 +220,8 @@ static void build_ready(void)
     // v0.2.0: 当前场景小标签(render 按 scene 更新; 让用户知道对谁说话)
     p->ready_scene = label(p->root, SCENE_NAMES[0], &font_cn_14, UI_SKY_DARK,
                            0, CONTENT_Y + 62, W);
-    hint_label(p->root, "按住音量+:说话  OK:选场景  下键:回车");
+    // v0.2.4: hint 场景化(voice_input=连续录音提示, render 更新)
+    p->ready_hint = hint_label(p->root, "按住音量+:说话  OK:选场景  下键:回车");
 }
 
 // v0.2.0: 场景选择页 —— 三行可选(同事 / 领导客户 / 对AI)
@@ -500,6 +502,13 @@ void app_ui_render(const app_ui_snapshot_t *snap)
         page_t *rp = &s_pages[APP_ST_READY];
         if (rp->ready_scene != NULL) {
             label_set_if_changed(rp->ready_scene, SCENE_NAMES[sc]);
+        }
+        // v0.2.4: voice_input 场景提示行切"连续录音"语义
+        if (rp->ready_hint != NULL && snap->state == APP_ST_READY) {
+            const char *hint = (snap->scene == APP_SCENE_VOICE_INPUT)
+                ? "按住音量+录音  可连录  确认键:汇总"
+                : "按住音量+:说话  OK:选场景  下键:回车";
+            label_set_if_changed(rp->ready_hint, hint);
         }
         break;
     }

@@ -89,7 +89,9 @@ esp_err_t app_sound_init(void) {
         ESP_LOGE(TAG, "bsp_audio_set_format 失败: %s", esp_err_to_name(e));
         return e;
     }
-    bsp_audio_set_volume(80);
+    // 提示音音量设为最低可听档:0=静音(mute),1=仅高于静音的最小可闻档。
+    // 用户需求 2026-09-08:外设音量调至最低但保持可听。
+    bsp_audio_set_volume(1);
 
     s_queue = xQueueCreateStatic(APP_TONE_COUNT, sizeof(uint8_t),
                                  s_queue_storage, &s_queue_struct);

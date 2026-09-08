@@ -207,12 +207,22 @@ static void start_ptt(app_state_t *s, uint64_t now_ms,
 
 // PTT 结束(音量加长按松开):停流 → voice.end → 转写。
 // 不播发送音:用户要求转写期静音(2026-08-28)。
+// v0.2.4 连续快录: voice_input(语音输入)场景松手即回 READY(不等转写)——
+// 用户可立即按住录下一句, 每句转写/梳理由 Mac 后台排队处理; 全部录完按
+// OK(结束录入)才汇集确认。其余场景保持原 TRANSCRIBING 等待(分段确认流)。
 static void end_ptt(app_state_t *s, uint64_t now_ms,
                     app_action_t *out, uint8_t *n, uint8_t max) {
     app_action_t st = { .type = APP_ACT_STREAM_STOP };
     emit(out, n, max, st);
     app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
     emit(out, n, max, v);
+    if (s->scene == APP_SCENE_VOICE_INPUT) {
+        s->state = APP_ST_READY;
+        s->state_since_ms = now_ms;
+        app_action_t r = { .type = APP_ACT_UI_REFRESH };
+        emit(out, n, max, r);
+        return;
+    }
     s->state = APP_ST_TRANSCRIBING;
     s->state_since_ms = now_ms;
     s->agent_state_name[0] = '\0';   // 新会话开始,清除旧 agent 状态
@@ -398,13 +408,29 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
 
     case APP_ST_READY:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
-            // v0.2.3 返回上一级: 就绪页 OK 单击 → 返回场景选择页(可重选场景
-            // 再回来; 想锁屏仍长按 OK, 单击/长按互不冲突)。
-            s->state = APP_ST_SCENE_SELECT;
-            s->state_since_ms = now_ms;
-            s->scene_cursor = s->scene;   // 光标停当前场景
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
+            if (s->scene == APP_SCENE_VOICE_INPUT) {
+                // v0.2.4 连续快录: 语音输入场景 OK = 结束录入 → 上行
+                // recording.done, Mac 把已后台梳理的句稿合并下行
+                // merge.result → 设备弹整理稿确认(MERGE_REVIEW)。
+                app_action_t a = { .type = APP_ACT_SEND_RECORDING_DONE };
+                emit(out, n, max, a);
+                app_action_t t = { .type = APP_ACT_PLAY_TONE };
+                t.u.tone = APP_TONE_APPROVAL;   // 提示"开始汇总"
+                emit(out, n, max, t);
+                s->state = APP_ST_AGENT_RUNNING;   // 等合并稿(复用 RUNNING 页)
+                s->state_since_ms = now_ms;
+                s->agent_state_name[0] = '\0';
+                app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                emit(out, n, max, r);
+            } else {
+                // v0.2.3 返回上一级: 就绪页 OK 单击 → 返回场景选择页(可重选场景
+                // 再回来; 想锁屏仍长按 OK, 单击/长按互不冲突)。
+                s->state = APP_ST_SCENE_SELECT;
+                s->state_since_ms = now_ms;
+                s->scene_cursor = s->scene;   // 光标停当前场景
+                app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                emit(out, n, max, r);
+            }
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
